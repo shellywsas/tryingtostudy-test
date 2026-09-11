@@ -481,6 +481,167 @@ function App() {
                 });
             };
 
+            const getWeeklyReportData = () => {
+                if (!activeUserData) return null;
+                const now = new Date();
+                const startOfWeek = new Date(now);
+                startOfWeek.setDate(now.getDate() - now.getDay());
+                startOfWeek.setHours(0,0,0,0);
+                
+                const endOfWeek = new Date(startOfWeek);
+                endOfWeek.setDate(startOfWeek.getDate() + 6);
+                endOfWeek.setHours(23,59,59,999);
+
+                const thisWeekTasks = (activeUserData.tasks || []).filter(t => {
+                    if (!t.completedAt) return false;
+                    const d = new Date(t.completedAt);
+                    return d >= startOfWeek && d <= endOfWeek;
+                });
+
+                const completedHW = thisWeekTasks.filter(t => !t.givenUp && !t.isExamPrep && !t.isLessonLog);
+                const givenUpHW = thisWeekTasks.filter(t => t.givenUp);
+                const examPrepDone = thisWeekTasks.filter(t => !t.givenUp && t.isExamPrep);
+                const lessonsLogged = thisWeekTasks.filter(t => t.isLessonLog);
+
+                const thisWeekExams = (activeUserData.exams || []).filter(e => {
+                    const d = new Date(e.date);
+                    return d >= startOfWeek && d <= endOfWeek;
+                });
+
+                const thisWeekHistory = (activeUserData.pointsHistory || []).filter(h => {
+                    const d = new Date(h.date);
+                    return d >= startOfWeek && d <= endOfWeek;
+                });
+
+                const totalPointsGained = thisWeekHistory.filter(h => h.points > 0).reduce((acc, h) => acc + h.points, 0);
+
+                return {
+                    startDate: startOfWeek.toLocaleDateString('he-IL'),
+                    endDate: endOfWeek.toLocaleDateString('he-IL'),
+                    completedHW,
+                    givenUpHW,
+                    examPrepDone,
+                    lessonsLogged,
+                    thisWeekExams,
+                    totalPointsGained
+                };
+            };
+
+            const toggleWhatsAppTaskReminder = (task) => {
+                const isCurrentlyActive = !!task.whatsappRemindersEnabled;
+                const sub = (activeUserData.subjects || []).find(s => s.id === task.subjectId);
+                const subjectName = sub ? sub.name : 'כללי';
+                const userName = activeUserData.name || 'שלי';
+
+                if (isCurrentlyActive) {
+                    updateUserData(prev => ({
+                        ...prev,
+                        tasks: (prev.tasks || []).map(t => t.id === task.id ? { ...t, whatsappRemindersEnabled: false } : t)
+                    }));
+                    showToast(`תזכורות וואטסאפ בוטלו עבור "${task.title}".`, 'info');
+                    return;
+                }
+
+                let phone = activeUserData.phoneNumber;
+                if (!phone) {
+                    phone = prompt('נא להזין מספר טלפון לקבלת תזכורות בוואטסאפ (לדוגמה: 0501234567):', '');
+                    if (!phone) return;
+                    updateUserData(prev => ({
+                        ...prev,
+                        phoneNumber: phone
+                    }));
+                }
+
+                updateUserData(prev => ({
+                    ...prev,
+                    tasks: (prev.tasks || []).map(t => t.id === task.id ? { ...t, whatsappRemindersEnabled: true } : t)
+                }));
+
+                const reminderText = WhatsAppService.generateStudentReminderText({
+                    studentName: userName,
+                    subjectName: subjectName,
+                    taskTitle: task.title,
+                    dueDate: task.dueDate,
+                    dueTime: task.dueTime,
+                    freeSlotText: 'בזמן הפנוי שלך לפי הלו"ז'
+                });
+
+                WhatsAppService.sendMessage({
+                    to: phone,
+                    message: reminderText,
+                    gatewayConfig: activeUserData.whatsappGateway
+                }).then(res => {
+                    if (res && res.status === 'sent_gateway') {
+                        showToast(`תזכורת וואטסאפ הופעלה ונשלחה אוטומטית! 💬`, 'success');
+                    } else {
+                        showToast(`תזכורת וואטסאפ הופעלה בהצלחה! 💬`, 'success');
+                    }
+                }).catch(err => {
+                    console.error('Error sending WhatsApp reminder:', err);
+                    showToast('תזכורת וואטסאפ הופעלה', 'info');
+                });
+            };
+
+            const handleSendWhatsAppTest = (isParent = false) => {
+                const targetPhone = isParent ? activeUserData.parentPhoneNumber : activeUserData.phoneNumber;
+                const label = isParent ? 'ההורים' : 'התלמידה';
+                if (!targetPhone) {
+                    showToast(`נא להזין מספר טלפון עבור ${label} 📱`, 'warning');
+                    return;
+                }
+
+                const testMsg = isParent 
+                    ? `שלום מהאפליקציה StudyStreak Pro! ✨\nזהו מספר הטלפון המוגדר לקבלת עדכונים ודוחות התקדמות שבועיים של ${activeUserData.name || 'התלמיד/ה'}. נהדר לראות את ההשקעה וההתקדמות!`
+                    : `היי ${activeUserData.name || 'אלופה'}! ✨\nבדיקת חיבור לוואטסאפ הצליחה! מכאן תקבלי תזכורות מוטיבציה שקטות וחכמות לשיעורי הבית לפי הלו"ז שלך 📚💪`;
+
+                WhatsAppService.sendMessage({
+                    to: targetPhone,
+                    message: testMsg,
+                    gatewayConfig: activeUserData.whatsappGateway
+                }).then(res => {
+                    if (res && res.status === 'sent_gateway') {
+                        showToast(`הודעת בדיקה נשלחה ישירות לוואטסאפ של ${label}! 🚀`, 'success');
+                    } else if (res && res.status === 'opened_link') {
+                        showToast(`נפתח וואטסאפ לשליחת הודעת בדיקה ל-${label} 📲`, 'info');
+                    }
+                }).catch(err => {
+                    console.error('Error sending test message:', err);
+                    showToast('שגיאה בשליחה לוואטסאפ', 'error');
+                });
+            };
+
+            const handleSendParentWeeklyReportWhatsApp = () => {
+                const parentPhone = activeUserData?.parentPhoneNumber;
+                if (!parentPhone) {
+                    showToast('נא להזין תחילה את מספר הטלפון של ההורים בהגדרות ⚙️', 'warning');
+                    setActiveTab('settings');
+                    return;
+                }
+
+                const reportData = getWeeklyReportData();
+                if (!reportData) {
+                    showToast('אין מספיק נתונים להפקת דוח שבועי כרגע', 'info');
+                    return;
+                }
+
+                const messageText = WhatsAppService.generateParentReportText(activeUserData.name || 'שלי', reportData);
+
+                WhatsAppService.sendMessage({
+                    to: parentPhone,
+                    message: messageText,
+                    gatewayConfig: activeUserData.whatsappGateway
+                }).then(res => {
+                    if (res && res.status === 'sent_gateway') {
+                        showToast('דוח שבועי נשלח אוטומטית לוואטסאפ של ההורים! 📨🚀', 'success');
+                    } else if (res && res.status === 'opened_link') {
+                        showToast('נפתח וואטסאפ לשליחת הדוח השבועי להורים 📲', 'info');
+                    }
+                }).catch(err => {
+                    console.error('Error sending parent report:', err);
+                    showToast('שגיאה בשליחת הדוח לוואטסאפ', 'error');
+                });
+            };
+
             const [liveFriends, setLiveFriends] = useState({});
             
             // תוקן החיבור למסד הנתונים של חברים - פועל ברקע ומכניס את ה-username פנימה!
@@ -865,7 +1026,8 @@ function App() {
                     tasks: prev.tasks.map(t => t.id === task.id ? { 
                         ...t, completed: true, completedAt: now.toISOString(), 
                         understandingRating: rating, hardExercises: hardExercises, pointsEarned: pointsDelta, lateReason: chosenLateReason,
-                        remindersEnabled: false
+                        remindersEnabled: false,
+                        whatsappRemindersEnabled: false
                     } : t),
                     totalPoints: prev.totalPoints + pointsDelta,
                     weeklyPoints: prev.weeklyPoints + pointsDelta,
@@ -1410,55 +1572,9 @@ function App() {
 
 
             const handleGenerateWeeklyReport = () => {
-                const now = new Date();
-                const startOfWeek = new Date(now);
-                startOfWeek.setDate(now.getDate() - now.getDay());
-                startOfWeek.setHours(0,0,0,0);
-                
-                const endOfWeek = new Date(startOfWeek);
-                endOfWeek.setDate(startOfWeek.getDate() + 6);
-                endOfWeek.setHours(23,59,59,999);
-
-
-                const thisWeekTasks = activeUserData.tasks.filter(t => {
-                    if (!t.completedAt) return false;
-                    const d = new Date(t.completedAt);
-                    return d >= startOfWeek && d <= endOfWeek;
-                });
-
-
-                const completedHW = thisWeekTasks.filter(t => !t.givenUp && !t.isExamPrep && !t.isLessonLog);
-                const givenUpHW = thisWeekTasks.filter(t => t.givenUp);
-                const examPrepDone = thisWeekTasks.filter(t => !t.givenUp && t.isExamPrep);
-                const lessonsLogged = thisWeekTasks.filter(t => t.isLessonLog);
-
-
-                const thisWeekExams = (activeUserData.exams || []).filter(e => {
-                    const d = new Date(e.date);
-                    return d >= startOfWeek && d <= endOfWeek;
-                });
-
-
-                const thisWeekHistory = (activeUserData.pointsHistory || []).filter(h => {
-                    const d = new Date(h.date);
-                    return d >= startOfWeek && d <= endOfWeek;
-                });
-
-
-                const totalPointsGained = thisWeekHistory.filter(h => h.points > 0).reduce((acc, h) => acc + h.points, 0);
-
-
-                setWeeklyReportData({
-                    startDate: startOfWeek.toLocaleDateString('he-IL'),
-                    endDate: endOfWeek.toLocaleDateString('he-IL'),
-                    completedHW,
-                    givenUpHW,
-                    examPrepDone,
-                    lessonsLogged,
-                    thisWeekExams,
-                    totalPointsGained
-                });
-
+                const report = getWeeklyReportData();
+                if (!report) return;
+                setWeeklyReportData(report);
 
                 setPrintType('weekly');
                 setPrintMode(true);
@@ -2454,6 +2570,11 @@ function App() {
                                                                         <span>🔔</span> תזכורות
                                                                     </span>
                                                                 )}
+                                                                {task.whatsappRemindersEnabled && (
+                                                                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-200 flex items-center gap-1 shadow-xs">
+                                                                        <span>💬</span> וואטסאפ
+                                                                    </span>
+                                                                )}
                                                             </div>
                                                             <div className="flex items-center gap-1.5 flex-wrap">
                                                                 {countdown && (
@@ -2568,6 +2689,11 @@ function App() {
                                                             {task.remindersEnabled && !task.completed && (
                                                                 <span className="text-[10px] font-bold text-purple-700 bg-purple-100 px-2 py-0.5 rounded-lg border border-purple-200 flex items-center gap-1 shadow-xs">
                                                                     <span>🔔</span> תזכורות פעילות
+                                                                </span>
+                                                            )}
+                                                            {task.whatsappRemindersEnabled && !task.completed && (
+                                                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-200 flex items-center gap-1 shadow-xs">
+                                                                    <span>💬</span> תזכורות וואטסאפ
                                                                 </span>
                                                             )}
                                                             {!task.isLessonLog && !task.completed && task.dueDate && (() => {
@@ -2723,6 +2849,123 @@ function App() {
                         {}
                         {activeTab === 'settings' && (
                             <div className="space-y-6 max-w-4xl mx-auto animate-[fadeIn_0.3s_ease-out]">
+                                {/* WhatsApp Integration Card */}
+                                <div className="bg-gradient-to-br from-emerald-500/10 via-teal-500/5 to-white p-6 rounded-3xl border border-emerald-200 shadow-[0_4px_20px_-4px_rgba(16,185,129,0.1)]">
+                                    <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 mb-6 pb-4 border-b border-emerald-100">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-500 text-white flex items-center justify-center text-2xl shadow-md">💬</div>
+                                            <div>
+                                                <h2 className="text-xl font-bold text-stone-800 tracking-tight">הגדרות וואטסאפ: תזכורות ודוחות הורים</h2>
+                                                <p className="text-xs text-stone-500 mt-0.5">תזכורות אישיות לשיעורי בית ושליחת סיכום התקדמות שבועי ישירות לוואטסאפ של ההורים</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                                        <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs flex flex-col justify-between">
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-700 block mb-1.5 flex items-center gap-1.5">
+                                                    <span>📱</span> מספר וואטסאפ של התלמידה (לתזכורות)
+                                                </label>
+                                                <input 
+                                                    type="tel"
+                                                    dir="ltr"
+                                                    placeholder="לדוגמה: 050-1234567"
+                                                    value={activeUserData.phoneNumber || ''}
+                                                    onChange={(e) => updateUserData({ phoneNumber: e.target.value })}
+                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
+                                                />
+                                            </div>
+                                            <div className="mt-3 flex justify-end">
+                                                <button 
+                                                    onClick={() => handleSendWhatsAppTest(false)}
+                                                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1">
+                                                    <span>⚡</span> שליחת הודעת בדיקה למספר שלי
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs flex flex-col justify-between">
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-700 block mb-1.5 flex items-center gap-1.5">
+                                                    <span>👨‍👩‍👧</span> מספר וואטסאפ של ההורים (לדוחות שבועיים)
+                                                </label>
+                                                <input 
+                                                    type="tel"
+                                                    dir="ltr"
+                                                    placeholder="לדוגמה: 052-7654321"
+                                                    value={activeUserData.parentPhoneNumber || ''}
+                                                    onChange={(e) => updateUserData({ parentPhoneNumber: e.target.value })}
+                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
+                                                />
+                                            </div>
+                                            <div className="mt-3 flex gap-2 justify-end flex-wrap">
+                                                <button 
+                                                    onClick={() => handleSendWhatsAppTest(true)}
+                                                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1">
+                                                    <span>💬</span> בדיקת מספר הורים
+                                                </button>
+                                                <button 
+                                                    onClick={handleSendParentWeeklyReportWhatsApp}
+                                                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1 shadow-sm">
+                                                    <span>📊</span> שליחת דוח שבועי עכשיו
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Advanced Gateway Config Accordion */}
+                                    <details className="group bg-white/85 backdrop-blur-sm rounded-2xl border border-emerald-200/80 p-4 transition-all">
+                                        <summary className="font-bold text-xs text-stone-700 cursor-pointer flex items-center justify-between list-none select-none">
+                                            <span className="flex items-center gap-2">
+                                                <span>🤖</span>
+                                                <span>חיבור Gateway לשליחה אוטומטית מלאה ברקע (Green-API / Instance)</span>
+                                                <span className="text-[10px] bg-stone-100 text-stone-600 px-2 py-0.5 rounded-md font-normal">אופציונלי למתקדמים</span>
+                                            </span>
+                                            <span className="transition-transform group-open:rotate-180 text-stone-400">▼</span>
+                                        </summary>
+                                        <div className="mt-4 pt-3 border-t border-emerald-100 text-xs text-stone-600 space-y-3">
+                                            <p className="leading-relaxed">
+                                                <b>איך זה עובד?</b> במצב רגיל, המערכת פותחת חלון וואטסאפ מוכן עם הטקסט והנמען. אם מחברים חשבון Green-API (קיים מסלול חינמי למפתחים), המערכת שולחת את ההודעות ישירות ועצמאית ברקע מבלי לפתוח חלון ומבלי שתצטרכי לאשר ידנית!
+                                            </p>
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                                                <div>
+                                                    <label className="font-bold text-stone-700 block mb-1 text-[11px]">Id Instance</label>
+                                                    <input 
+                                                        type="text"
+                                                        placeholder="למשל: 110182..."
+                                                        value={activeUserData.whatsappGateway?.instanceId || ''}
+                                                        onChange={(e) => updateUserData(prev => ({
+                                                            ...prev,
+                                                            whatsappGateway: {
+                                                                ...(prev.whatsappGateway || {}),
+                                                                instanceId: e.target.value
+                                                            }
+                                                        }))}
+                                                        className="w-full p-2.5 bg-stone-50 border border-stone-200 rounded-lg text-xs font-mono outline-none focus:border-emerald-500 focus:bg-white"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="font-bold text-stone-700 block mb-1 text-[11px]">Api Token Instance</label>
+                                                    <input 
+                                                        type="password"
+                                                        placeholder="טוקן סודי של ה-Instance"
+                                                        value={activeUserData.whatsappGateway?.apiToken || ''}
+                                                        onChange={(e) => updateUserData(prev => ({
+                                                            ...prev,
+                                                            whatsappGateway: {
+                                                                ...(prev.whatsappGateway || {}),
+                                                                apiToken: e.target.value
+                                                            }
+                                                        }))}
+                                                        className="w-full p-2.5 bg-stone-50 border border-stone-200 rounded-lg text-xs font-mono outline-none focus:border-emerald-500 focus:bg-white"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </details>
+                                </div>
+
                                 <div className="bg-gradient-to-br from-purple-500/10 via-pink-500/5 to-white p-6 rounded-3xl border border-purple-200 shadow-[0_4px_20px_-4px_rgba(147,51,234,0.08)]">
                                     <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 mb-4 pb-4 border-b border-purple-100">
                                         <div className="flex items-center gap-3">
@@ -3682,9 +3925,14 @@ function App() {
                                                     הפיקי בלחיצה דוח מסודר שמסכם את כל הלמידה, המשימות והנקודות שצברת השבוע, כדי לשתף ולהראות את ההשקעה שלך!
                                                 </p>
                                             </div>
-                                            <button onClick={handleGenerateWeeklyReport} className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-4 rounded-xl text-sm font-bold shadow-md transition-all active:scale-95 shrink-0 flex items-center justify-center gap-2">
-                                                הפקת דוח שבועי 🖨️
-                                            </button>
+                                            <div className="flex flex-col sm:flex-row gap-2.5 w-full sm:w-auto shrink-0">
+                                                <button onClick={handleGenerateWeeklyReport} className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3.5 rounded-xl text-sm font-bold shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
+                                                    הפקת דוח להדפסה / PDF 🖨️
+                                                </button>
+                                                <button onClick={handleSendParentWeeklyReportWhatsApp} className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-3.5 rounded-xl text-sm font-bold shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
+                                                    <span>📲</span> שליחה לוואטסאפ של ההורים
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
 
@@ -4804,6 +5052,27 @@ function App() {
                                                 task.remindersEnabled ? 'bg-purple-200 text-purple-800' : 'bg-purple-100 text-purple-700'
                                             }`}>
                                                 {task.remindersEnabled ? 'פעיל כעת' : 'בלחיצה אחת ✨'}
+                                            </span>
+                                        </button>
+
+                                        <button 
+                                            onClick={() => {
+                                                toggleWhatsAppTaskReminder(task);
+                                                setTaskActionsMenu(null);
+                                            }}
+                                            className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all font-bold text-sm active:scale-98 shadow-xs ${
+                                                task.whatsappRemindersEnabled 
+                                                    ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border-emerald-200' 
+                                                    : 'bg-gradient-to-r from-emerald-50 to-teal-50 hover:from-emerald-100 hover:to-teal-100 text-emerald-900 border-emerald-200'
+                                            }`}>
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xl">{task.whatsappRemindersEnabled ? '🛑' : '💬'}</span>
+                                                <span>{task.whatsappRemindersEnabled ? 'ביטול תזכורות וואטסאפ' : 'הפעלת תזכורות וואטסאפ ✨'}</span>
+                                            </div>
+                                            <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                                                task.whatsappRemindersEnabled ? 'bg-emerald-200 text-emerald-800' : 'bg-emerald-100 text-emerald-700'
+                                            }`}>
+                                                {task.whatsappRemindersEnabled ? 'פעיל בוואטסאפ' : 'לוח זמנים חכם 📲'}
                                             </span>
                                         </button>
 

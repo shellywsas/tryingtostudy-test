@@ -204,6 +204,14 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             streakHistory: [],
             friends: [],
             exams: [],
+            phoneNumber: '',
+            parentPhoneNumber: '',
+            whatsappGateway: {
+                instanceId: '',
+                apiToken: '',
+                host: 'https://api.green-api.com'
+            },
+            autoSendParentReport: true,
             notifications: [],
             badges: [] 
         };
