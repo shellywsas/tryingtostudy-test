@@ -332,10 +332,24 @@ function App() {
             };
 
             const testInstantNotification = () => {
-                if (!("Notification" in window)) {
-                    showToast('הדפדפן אינו תומך בהתראות. באייפון יש להוסיף את האתר למסך הבית תחילה!', 'warning');
+                const isStandalone = (typeof window !== 'undefined') && (window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches);
+                if (isIOSDevice && !isStandalone) {
+                    setNotificationHelpTab('ios');
+                    toggleModal('notificationHelp', true);
                     return;
                 }
+
+                if (!("Notification" in window)) {
+                    toggleModal('notificationHelp', true);
+                    return;
+                }
+
+                if (Notification.permission === 'denied') {
+                    setNotificationHelpTab(isIOSDevice ? 'ios' : 'android');
+                    toggleModal('notificationHelp', true);
+                    return;
+                }
+
                 Notification.requestPermission().then(permission => {
                     if (permission === 'granted') {
                         const testMsg = 'היי שלי! 🌸 זו התראת בדיקה של StudyStreak – ככה יקפצו לך תזכורות מעודדות על מסך הנעילה בזמנים הפנויים!';
@@ -362,13 +376,13 @@ function App() {
                                 showToast('לא ניתן היה להציג התראה כעת בדפדפן', 'warning');
                             }
                         }
-                    } else if (permission === 'denied') {
-                        showToast('ההתראות חסומות בהגדרות הדפדפן/טלפון. נא לאפשר התראות בהגדרות.', 'warning');
                     } else {
-                        showToast('כדי לקבל תזכורות במסך הנעילה, יש לאשר קבלת התראות', 'warning');
+                        setNotificationHelpTab(isIOSDevice ? 'ios' : 'android');
+                        toggleModal('notificationHelp', true);
                     }
                 }).catch(err => {
-                    showToast('שגיאה בבקשת הרשאת התראות: ' + (err.message || err), 'warning');
+                    setNotificationHelpTab(isIOSDevice ? 'ios' : 'android');
+                    toggleModal('notificationHelp', true);
                 });
             };
 
@@ -392,8 +406,16 @@ function App() {
                     return;
                 }
 
-                if (!("Notification" in window)) {
-                    showToast('הדפדפן אינו תומך בהתראות פוש. באייפון יש להוסיף את האפליקציה למסך הבית תחילה!', 'warning');
+                const isStandalone = (typeof window !== 'undefined') && (window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches);
+                if (isIOSDevice && !isStandalone) {
+                    setNotificationHelpTab('ios');
+                    toggleModal('notificationHelp', true);
+                    return;
+                }
+
+                if (!("Notification" in window) || Notification.permission === 'denied') {
+                    setNotificationHelpTab(isIOSDevice ? 'ios' : 'android');
+                    toggleModal('notificationHelp', true);
                     return;
                 }
 
@@ -513,11 +535,14 @@ function App() {
             const [weeklyReportData, setWeeklyReportData] = useState(null);
 
 
+            const isIOSDevice = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+            const [notificationHelpTab, setNotificationHelpTab] = useState(isIOSDevice ? 'ios' : 'android');
+
             const [modals, setModals] = useState({
                 task: false, complete: false, subject: false, 
                 friend: false, pointsHistory: false, streakHistory: false,
                 addFriend: false, addAnchor: false, examPlanner: false, cancelExam: false, giveUp: false,
-                examGrade: false, quickExam: false, edit: false, reminderMode: false
+                examGrade: false, quickExam: false, edit: false, reminderMode: false, notificationHelp: false
             });
 
 
@@ -4547,6 +4572,139 @@ function App() {
                         </div>
                         );
                     })()}
+
+                    {modals.notificationHelp && (
+                        <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-xs z-[80] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]"
+                             onClick={() => toggleModal('notificationHelp', false)}>
+                            <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 shadow-2xl relative overflow-y-auto max-h-[90vh] custom-scrollbar animate-[slideUp_0.25s_ease-out] pb-safe-bottom md:pb-6 text-right"
+                                 onClick={(e) => e.stopPropagation()}>
+                                <div className="w-12 h-1.5 bg-stone-200 rounded-full mx-auto mb-4 md:hidden"></div>
+                                
+                                <div className="flex justify-between items-start mb-4 pb-3 border-b border-stone-100">
+                                    <div className="flex items-center gap-2.5">
+                                        <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-500 text-white flex items-center justify-center text-xl shadow-sm">🔔</div>
+                                        <div>
+                                            <h3 className="font-bold text-lg text-stone-800 leading-snug">איך לאפשר התראות בטלפון?</h3>
+                                            <p className="text-xs text-stone-400">מדריך קצר וברור של 10 שניות</p>
+                                        </div>
+                                    </div>
+                                    <button onClick={() => toggleModal('notificationHelp', false)} className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full active:scale-95 transition-colors">
+                                        <IconX className="w-4 h-4"/>
+                                    </button>
+                                </div>
+
+                                {/* Tabs */}
+                                <div className="flex gap-2 p-1 bg-stone-100 rounded-2xl mb-4">
+                                    <button 
+                                        type="button"
+                                        onClick={() => setNotificationHelpTab('ios')}
+                                        className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${notificationHelpTab === 'ios' ? 'bg-white text-purple-900 shadow-xs' : 'text-stone-500 hover:text-stone-800'}`}>
+                                        <span>🍎</span> אייפון (iPhone)
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={() => setNotificationHelpTab('android')}
+                                        className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${notificationHelpTab === 'android' ? 'bg-white text-indigo-900 shadow-xs' : 'text-stone-500 hover:text-stone-800'}`}>
+                                        <span>🤖</span> אנדרואיד / כרום
+                                    </button>
+                                </div>
+
+                                {notificationHelpTab === 'ios' ? (
+                                    <div className="space-y-3.5 text-xs text-stone-700">
+                                        <div className="p-3 bg-purple-50 rounded-2xl border border-purple-200 text-purple-900 font-medium leading-relaxed">
+                                            באייפון (iOS), אפל מאפשרת קבלת התראות מאתרים <b>רק לאחר שמוסיפים את האתר למסך הבית</b>.
+                                        </div>
+
+                                        <div className="space-y-2">
+                                            <div className="flex items-start gap-2.5 p-2.5 bg-stone-50 rounded-xl border border-stone-200">
+                                                <span className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">1</span>
+                                                <div>
+                                                    <div className="font-bold text-stone-800">לחצי על כפתור השיתוף (Share)</div>
+                                                    <div className="text-stone-500 mt-0.5">בתחתית מסך ספארי, לחצי על סמל הריבוע עם החץ למעלה ⎋.</div>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-start gap-2.5 p-2.5 bg-stone-50 rounded-xl border border-stone-200">
+                                                <span className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">2</span>
+                                                <div>
+                                                    <div className="font-bold text-stone-800">בחרי "הוסף למסך הבית" ➕</div>
+                                                    <div className="text-stone-500 mt-0.5">גללי מעט בתפריט ולחצי על <b>"הוסף למסך הבית" (Add to Home Screen)</b> ואז על <b>"הוסף"</b>.</div>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-start gap-2.5 p-2.5 bg-stone-50 rounded-xl border border-stone-200">
+                                                <span className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">3</span>
+                                                <div>
+                                                    <div className="font-bold text-stone-800">פתחי את האפליקציה ממסך הבית</div>
+                                                    <div className="text-stone-500 mt-0.5">צאי מספארי, פתחי את האייקון <b>StudyStreak</b> ממסך הבית, לחצי <b>"בדיקה"</b> ואשרי התראות!</div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 text-stone-600 text-[11px] leading-relaxed">
+                                            <b>כבר פתחת ממסך הבית ועדיין חסום?</b><br/>
+                                            כנסי ל-<b>הגדרות האייפון ⚙️</b> ➔ גללי למטה ברשימת האפליקציות אל <b>StudyStreak</b> (או <b>Safari</b>) ➔ <b>התראות (Notifications)</b> ➔ הפעילי את <b>"אפשר התראות"</b>.
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3.5 text-xs text-stone-700">
+                                        <div className="p-3 bg-indigo-50 rounded-2xl border border-indigo-200 text-indigo-900 font-medium leading-relaxed">
+                                            באנדרואיד ניתן לאפשר התראות ישירות מתוך הדפדפן בשתי לחיצות:
+                                        </div>
+
+                                        <div className="space-y-2">
+                                            <div className="flex items-start gap-2.5 p-2.5 bg-stone-50 rounded-xl border border-stone-200">
+                                                <span className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">1</span>
+                                                <div>
+                                                    <div className="font-bold text-stone-800">לחצי על סמל המנעול 🔒 ליד כתובת האתר</div>
+                                                    <div className="text-stone-500 mt-0.5">בראש הדפדפן (משמאל לכתובת האתר) לחצי על סמל המנעול או כפתור הגדרות האתר.</div>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-start gap-2.5 p-2.5 bg-stone-50 rounded-xl border border-stone-200">
+                                                <span className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">2</span>
+                                                <div>
+                                                    <div className="font-bold text-stone-800">שני את "התראות" ל-מאופשר (Allow) ✅</div>
+                                                    <div className="text-stone-500 mt-0.5">לחצי על <b>"הרשאות" (Permissions)</b> והעבירי את מתג <b>"התראות"</b> למצב פעיל.</div>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-start gap-2.5 p-2.5 bg-stone-50 rounded-xl border border-stone-200">
+                                                <span className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">3</span>
+                                                <div>
+                                                    <div className="font-bold text-stone-800">רענני את העמוד</div>
+                                                    <div className="text-stone-500 mt-0.5">משכי את המסך קלות כלפי מטה לרענון — וההתראות יפעלו כרגיל ברקע!</div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 text-stone-600 text-[11px] leading-relaxed">
+                                            <b>אם כרום חסום בהגדרות הטלפון הכלליות:</b><br/>
+                                            הגדרות הטלפון ⚙️ ➔ <b>אפליקציות (Apps)</b> ➔ <b>Chrome</b> ➔ <b>התראות</b> ➔ הפעילי את המתג הראשי.
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className="mt-5 pt-3 border-t border-stone-100 flex gap-2">
+                                    <button 
+                                        type="button"
+                                        onClick={() => {
+                                            toggleModal('notificationHelp', false);
+                                            setTimeout(testInstantNotification, 200);
+                                        }}
+                                        className="flex-1 py-3 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white rounded-2xl font-bold text-xs shadow-md active:scale-95 transition-all flex items-center justify-center gap-1.5">
+                                        <span>🔄</span> ניסיתי, בדוק שוב עכשיו!
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={() => toggleModal('notificationHelp', false)}
+                                        className="px-4 py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-2xl font-bold text-xs transition-colors active:scale-95">
+                                        סגירה
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {taskActionsMenu && (() => {
                         const task = taskActionsMenu;
