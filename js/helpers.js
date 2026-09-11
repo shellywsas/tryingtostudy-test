@@ -206,12 +206,15 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             exams: [],
             phoneNumber: '',
             parentPhoneNumber: '',
+            parentPhoneNumber2: '',
             whatsappGateway: {
                 instanceId: '',
                 apiToken: '',
                 host: 'https://api.green-api.com'
             },
             autoSendParentReport: true,
+            lastWeeklyReportSentWeek: '',
+            lastTaskRemindersSent: {},
             notifications: [],
             badges: [] 
         };

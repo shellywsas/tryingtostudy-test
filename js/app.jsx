@@ -582,14 +582,34 @@ function App() {
                 });
             };
 
-            const handleSendWhatsAppTest = (isParent = false) => {
-                const targetPhone = isParent ? activeUserData.parentPhoneNumber : activeUserData.phoneNumber;
-                const label = isParent ? 'ההורים' : 'התלמידה';
+            const getWeekIdentifier = (d = new Date()) => {
+                const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+                date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+                const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+                const weekNo = Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+                return `${date.getUTCFullYear()}-W${weekNo}`;
+            };
+
+            const handleSendWhatsAppTest = (type = 'student') => {
+                let targetPhone = '';
+                let label = '';
+                if (type === 'student' || type === false) {
+                    targetPhone = activeUserData?.phoneNumber;
+                    label = 'התלמידה';
+                } else if (type === 'parent1' || type === true) {
+                    targetPhone = activeUserData?.parentPhoneNumber;
+                    label = 'הורה 1';
+                } else if (type === 'parent2') {
+                    targetPhone = activeUserData?.parentPhoneNumber2;
+                    label = 'הורה 2';
+                }
+
                 if (!targetPhone) {
                     showToast(`נא להזין מספר טלפון עבור ${label} 📱`, 'warning');
                     return;
                 }
 
+                const isParent = type !== 'student' && type !== false;
                 const testMsg = isParent 
                     ? `שלום מהאפליקציה StudyStreak Pro! ✨\nזהו מספר הטלפון המוגדר לקבלת עדכונים ודוחות התקדמות שבועיים של ${activeUserData.name || 'התלמיד/ה'}. נהדר לראות את ההשקעה וההתקדמות!`
                     : `היי ${activeUserData.name || 'אלופה'}! ✨\nבדיקת חיבור לוואטסאפ הצליחה! מכאן תקבלי תזכורות מוטיבציה שקטות וחכמות לשיעורי הבית לפי הלו"ז שלך 📚💪`;
@@ -610,37 +630,118 @@ function App() {
                 });
             };
 
-            const handleSendParentWeeklyReportWhatsApp = () => {
-                const parentPhone = activeUserData?.parentPhoneNumber;
-                if (!parentPhone) {
-                    showToast('נא להזין תחילה את מספר הטלפון של ההורים בהגדרות ⚙️', 'warning');
-                    setActiveTab('settings');
+            const handleSendParentWeeklyReportWhatsApp = (silent = false) => {
+                const p1 = activeUserData?.parentPhoneNumber?.trim();
+                const p2 = activeUserData?.parentPhoneNumber2?.trim();
+
+                if (!p1 && !p2) {
+                    if (!silent) {
+                        showToast('נא להזין תחילה לפחות מספר הורה אחד בהגדרות ⚙️', 'warning');
+                        setActiveTab('settings');
+                    }
                     return;
                 }
 
                 const reportData = getWeeklyReportData();
                 if (!reportData) {
-                    showToast('אין מספיק נתונים להפקת דוח שבועי כרגע', 'info');
+                    if (!silent) showToast('אין מספיק נתונים להפקת דוח שבועי כרגע', 'info');
                     return;
                 }
 
                 const messageText = WhatsAppService.generateParentReportText(activeUserData.name || 'שלי', reportData);
+                const recipients = [p1, p2].filter(Boolean);
 
-                WhatsAppService.sendMessage({
-                    to: parentPhone,
-                    message: messageText,
-                    gatewayConfig: activeUserData.whatsappGateway
-                }).then(res => {
-                    if (res && res.status === 'sent_gateway') {
-                        showToast('דוח שבועי נשלח אוטומטית לוואטסאפ של ההורים! 📨🚀', 'success');
-                    } else if (res && res.status === 'opened_link') {
-                        showToast('נפתח וואטסאפ לשליחת הדוח השבועי להורים 📲', 'info');
-                    }
-                }).catch(err => {
-                    console.error('Error sending parent report:', err);
-                    showToast('שגיאה בשליחת הדוח לוואטסאפ', 'error');
+                recipients.forEach(phone => {
+                    WhatsAppService.sendMessage({
+                        to: phone,
+                        message: messageText,
+                        gatewayConfig: activeUserData.whatsappGateway
+                    }).catch(err => console.error('Error sending parent report to:', phone, err));
                 });
+
+                const currentWeek = getWeekIdentifier();
+                updateUserData(prev => ({
+                    ...prev,
+                    lastWeeklyReportSentWeek: currentWeek
+                }));
+
+                if (!silent) {
+                    if (activeUserData?.whatsappGateway?.instanceId) {
+                        showToast(`דוח שבועי נשלח אוטומטית לוואטסאפ של ${recipients.length > 1 ? 'שני ההורים' : 'ההורים'}! 📨🚀`, 'success');
+                    } else {
+                        showToast(`נפתח וואטסאפ לשליחת הדוח השבועי להורים 📲`, 'info');
+                    }
+                }
             };
+
+            // אוטומציה של וואטסאפ: שליחת דוח שבועי במוצאי שבת ותזכורות משימות מתוזמנות
+            useEffect(() => {
+                if (!activeUserData || !activeUserData.whatsappGateway?.instanceId) return;
+
+                const runWhatsAppAutomationCheck = () => {
+                    const now = new Date();
+                    const day = now.getDay(); // 6 = Saturday, 0 = Sunday
+                    const hour = now.getHours();
+                    const currentWeek = getWeekIdentifier(now);
+
+                    // 1. שליחת דוח הורים במוצאי שבת (החל מ-19:00) או בראשון בבוקר
+                    const isSaturdayEveningOrSunday = (day === 6 && hour >= 19) || (day === 0 && hour < 14);
+                    const alreadySentThisWeek = activeUserData.lastWeeklyReportSentWeek === currentWeek;
+                    const autoSendEnabled = activeUserData.autoSendParentReport !== false;
+
+                    if (isSaturdayEveningOrSunday && !alreadySentThisWeek && autoSendEnabled) {
+                        const hasParent = activeUserData.parentPhoneNumber || activeUserData.parentPhoneNumber2;
+                        if (hasParent) {
+                            console.log('Sending automatic Saturday evening parent report via WhatsApp...');
+                            handleSendParentWeeklyReportWhatsApp(true);
+                        }
+                    }
+
+                    // 2. תזכורות משימות חכמות (רק עבור משימות שהופעלו עליהן תזכורות וואטסאפ)
+                    if (activeUserData.phoneNumber) {
+                        const activeTasks = (activeUserData.tasks || []).filter(t => !t.completed && t.whatsappRemindersEnabled && t.dueDate);
+                        const lastSentMap = activeUserData.lastTaskRemindersSent || {};
+                        let updatedSentMap = null;
+
+                        activeTasks.forEach(task => {
+                            const lastSentTime = lastSentMap[task.id] || 0;
+                            const hoursSince = (Date.now() - lastSentTime) / (1000 * 60 * 60);
+
+                            // שליחה מרווחת (פעם ב-5 שעות לכל היותר למשימה, בשעות היום 08:00-22:00)
+                            if (hoursSince >= 5 && hour >= 8 && hour <= 22) {
+                                const sub = (activeUserData.subjects || []).find(s => s.id === task.subjectId);
+                                const reminderMsg = WhatsAppService.generateStudentReminderText({
+                                    studentName: activeUserData.name || 'שלי',
+                                    subjectName: sub ? sub.name : 'כללי',
+                                    taskTitle: task.title,
+                                    dueDate: task.dueDate,
+                                    dueTime: task.dueTime,
+                                    freeSlotText: 'הזמן הפנוי שלך לפי הלו"ז'
+                                });
+
+                                WhatsAppService.sendMessage({
+                                    to: activeUserData.phoneNumber,
+                                    message: reminderMsg,
+                                    gatewayConfig: activeUserData.whatsappGateway
+                                }).then(res => {
+                                    if (res && res.status === 'sent_gateway') {
+                                        if (!updatedSentMap) updatedSentMap = { ...lastSentMap };
+                                        updatedSentMap[task.id] = Date.now();
+                                        updateUserData(prev => ({
+                                            ...prev,
+                                            lastTaskRemindersSent: updatedSentMap
+                                        }));
+                                    }
+                                }).catch(e => console.error('Automated WhatsApp reminder error:', e));
+                            }
+                        });
+                    }
+                };
+
+                runWhatsAppAutomationCheck();
+                const intervalId = setInterval(runWhatsAppAutomationCheck, 10 * 60 * 1000);
+                return () => clearInterval(intervalId);
+            }, [activeUserData?.whatsappGateway?.instanceId, activeUserData?.lastWeeklyReportSentWeek, activeUserData?.tasks]);
 
             const [liveFriends, setLiveFriends] = useState({});
             
@@ -2462,14 +2563,6 @@ function App() {
                             </div>
                         </div>
 
-
-                        <button 
-                            onClick={testInstantNotification} 
-                            className="w-full mb-4 py-2.5 bg-gradient-to-r from-purple-50 to-pink-50 hover:from-purple-100 hover:to-pink-100 text-purple-800 border border-purple-200 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 shadow-xs"
-                            title="שליחת התראת בדיקה למכשיר">
-                            <span>🔔</span> בדיקת התראת פוש
-                        </button>
-
                         <Navigation />
                         
                         <div className="mt-auto pt-6">
@@ -2489,12 +2582,6 @@ function App() {
                             <div className="font-bold text-lg text-stone-800 tracking-tight">StudyStreak</div>
                         </div>
                         <div className="flex gap-2 items-center">
-                            <button 
-                                onClick={testInstantNotification} 
-                                className="bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95 shadow-xs"
-                                title="בדיקת התראה במסך הנעילה">
-                                <span>🔔</span> בדיקה
-                            </button>
                             <button onClick={()=>toggleModal('streakHistory', true)} className="bg-purple-50 text-purple-700 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95">
                                 <span>🔥</span> {activeUserData.taskStreak}
                             </button>
@@ -2856,77 +2943,129 @@ function App() {
                                             <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-500 text-white flex items-center justify-center text-2xl shadow-md">💬</div>
                                             <div>
                                                 <h2 className="text-xl font-bold text-stone-800 tracking-tight">הגדרות וואטסאפ: תזכורות ודוחות הורים</h2>
-                                                <p className="text-xs text-stone-500 mt-0.5">תזכורות אישיות לשיעורי בית ושליחת סיכום התקדמות שבועי ישירות לוואטסאפ של ההורים</p>
+                                                <p className="text-xs text-stone-500 mt-0.5">תזכורות מוטיבציה שקטות לפי הלו"ז ודוחות שבועיים אוטומטיים בכל מוצאי שבת</p>
                                             </div>
+                                        </div>
+                                        {activeUserData.whatsappGateway?.instanceId && (
+                                            <span className="px-3 py-1.5 rounded-xl bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center gap-1.5 border border-emerald-200 w-fit">
+                                                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> מחובר ל-Gateway (שליחה ברקע פעילה!)
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    {/* Phone Inputs */}
+                                    <div className="space-y-4 mb-6">
+                                        {/* Student Phone */}
+                                        <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs">
+                                            <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                                                <div className="flex-1">
+                                                    <label className="text-xs font-bold text-stone-700 block mb-1.5 flex items-center gap-1.5">
+                                                        <span>📱</span> מספר וואטסאפ של התלמידה (לתזכורות אישיות לשיעורים)
+                                                    </label>
+                                                    <input 
+                                                        type="tel"
+                                                        dir="ltr"
+                                                        placeholder="לדוגמה: 050-1234567"
+                                                        value={activeUserData.phoneNumber || ''}
+                                                        onChange={(e) => updateUserData({ phoneNumber: e.target.value })}
+                                                        className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
+                                                    />
+                                                </div>
+                                                <button 
+                                                    onClick={() => handleSendWhatsAppTest('student')}
+                                                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-4 py-3 rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1 shrink-0 self-end sm:self-center">
+                                                    <span>⚡</span> שליחת בדיקה למספר שלי
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Parents Phones */}
+                                        <div className="bg-white p-5 rounded-2xl border border-emerald-100 shadow-xs space-y-4">
+                                            <div className="flex items-center justify-between pb-3 border-b border-stone-100 flex-wrap gap-2">
+                                                <div className="font-bold text-sm text-stone-800 flex items-center gap-2">
+                                                    <span>👨‍👩‍👧</span> מספרי טלפון של ההורים (לסיכום השבועי במוצ"ש)
+                                                </div>
+                                                <button 
+                                                    onClick={() => handleSendParentWeeklyReportWhatsApp(false)}
+                                                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 shadow-sm">
+                                                    <span>📊</span> שליחת דוח שבועי להורים עכשיו
+                                                </button>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="text-xs font-bold text-stone-600 block mb-1.5 flex items-center justify-between">
+                                                        <span>הורה 1 (למשל אמא)</span>
+                                                        {activeUserData.parentPhoneNumber && (
+                                                            <button 
+                                                                onClick={() => handleSendWhatsAppTest('parent1')}
+                                                                className="text-emerald-700 hover:underline text-[11px] font-bold">
+                                                                💬 בדיקת מספר
+                                                            </button>
+                                                        )}
+                                                    </label>
+                                                    <input 
+                                                        type="tel"
+                                                        dir="ltr"
+                                                        placeholder="לדוגמה: 052-1234567"
+                                                        value={activeUserData.parentPhoneNumber || ''}
+                                                        onChange={(e) => updateUserData({ parentPhoneNumber: e.target.value })}
+                                                        className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
+                                                    />
+                                                </div>
+
+                                                <div>
+                                                    <label className="text-xs font-bold text-stone-600 block mb-1.5 flex items-center justify-between">
+                                                        <span>הורה 2 (למשל אבא - אופציונלי)</span>
+                                                        {activeUserData.parentPhoneNumber2 && (
+                                                            <button 
+                                                                onClick={() => handleSendWhatsAppTest('parent2')}
+                                                                className="text-emerald-700 hover:underline text-[11px] font-bold">
+                                                                💬 בדיקת מספר
+                                                            </button>
+                                                        )}
+                                                    </label>
+                                                    <input 
+                                                        type="tel"
+                                                        dir="ltr"
+                                                        placeholder="לדוגמה: 054-7654321"
+                                                        value={activeUserData.parentPhoneNumber2 || ''}
+                                                        onChange={(e) => updateUserData({ parentPhoneNumber2: e.target.value })}
+                                                        className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <label className="flex items-center gap-3 p-3 bg-emerald-50/60 rounded-xl cursor-pointer hover:bg-emerald-50 transition-colors border border-emerald-100">
+                                                <input 
+                                                    type="checkbox"
+                                                    checked={activeUserData.autoSendParentReport !== false}
+                                                    onChange={(e) => updateUserData({ autoSendParentReport: e.target.checked })}
+                                                    className="w-4 h-4 text-emerald-600 rounded accent-emerald-600"
+                                                />
+                                                <div className="text-xs text-stone-700">
+                                                    <span className="font-bold block">שליחה אוטומטית של דוח שבועי בכל מוצאי שבת 🗓️</span>
+                                                    <span className="text-stone-500">המערכת תסכם אוטומטית את כל המשימות, שעות הלמידה וההתמדה ותשלח לשני ההורים בימי שבת בערב.</span>
+                                                </div>
+                                            </label>
                                         </div>
                                     </div>
 
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                                        <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs flex flex-col justify-between">
-                                            <div>
-                                                <label className="text-xs font-bold text-stone-700 block mb-1.5 flex items-center gap-1.5">
-                                                    <span>📱</span> מספר וואטסאפ של התלמידה (לתזכורות)
-                                                </label>
-                                                <input 
-                                                    type="tel"
-                                                    dir="ltr"
-                                                    placeholder="לדוגמה: 050-1234567"
-                                                    value={activeUserData.phoneNumber || ''}
-                                                    onChange={(e) => updateUserData({ phoneNumber: e.target.value })}
-                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
-                                                />
-                                            </div>
-                                            <div className="mt-3 flex justify-end">
-                                                <button 
-                                                    onClick={() => handleSendWhatsAppTest(false)}
-                                                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1">
-                                                    <span>⚡</span> שליחת הודעת בדיקה למספר שלי
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs flex flex-col justify-between">
-                                            <div>
-                                                <label className="text-xs font-bold text-stone-700 block mb-1.5 flex items-center gap-1.5">
-                                                    <span>👨‍👩‍👧</span> מספר וואטסאפ של ההורים (לדוחות שבועיים)
-                                                </label>
-                                                <input 
-                                                    type="tel"
-                                                    dir="ltr"
-                                                    placeholder="לדוגמה: 052-7654321"
-                                                    value={activeUserData.parentPhoneNumber || ''}
-                                                    onChange={(e) => updateUserData({ parentPhoneNumber: e.target.value })}
-                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
-                                                />
-                                            </div>
-                                            <div className="mt-3 flex gap-2 justify-end flex-wrap">
-                                                <button 
-                                                    onClick={() => handleSendWhatsAppTest(true)}
-                                                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1">
-                                                    <span>💬</span> בדיקת מספר הורים
-                                                </button>
-                                                <button 
-                                                    onClick={handleSendParentWeeklyReportWhatsApp}
-                                                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 flex items-center gap-1 shadow-sm">
-                                                    <span>📊</span> שליחת דוח שבועי עכשיו
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Advanced Gateway Config Accordion */}
+                                    {/* Gateway Config Accordion */}
                                     <details className="group bg-white/85 backdrop-blur-sm rounded-2xl border border-emerald-200/80 p-4 transition-all">
                                         <summary className="font-bold text-xs text-stone-700 cursor-pointer flex items-center justify-between list-none select-none">
                                             <span className="flex items-center gap-2">
                                                 <span>🤖</span>
                                                 <span>חיבור Gateway לשליחה אוטומטית מלאה ברקע (Green-API / Instance)</span>
-                                                <span className="text-[10px] bg-stone-100 text-stone-600 px-2 py-0.5 rounded-md font-normal">אופציונלי למתקדמים</span>
+                                                <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
+                                                    {activeUserData.whatsappGateway?.instanceId ? '✓ מחובר' : 'הגדרות חיבור'}
+                                                </span>
                                             </span>
                                             <span className="transition-transform group-open:rotate-180 text-stone-400">▼</span>
                                         </summary>
                                         <div className="mt-4 pt-3 border-t border-emerald-100 text-xs text-stone-600 space-y-3">
                                             <p className="leading-relaxed">
-                                                <b>איך זה עובד?</b> במצב רגיל, המערכת פותחת חלון וואטסאפ מוכן עם הטקסט והנמען. אם מחברים חשבון Green-API (קיים מסלול חינמי למפתחים), המערכת שולחת את ההודעות ישירות ועצמאית ברקע מבלי לפתוח חלון ומבלי שתצטרכי לאשר ידנית!
+                                                <b>איך זה עובד?</b> במצב רגיל, המערכת פותחת חלון וואטסאפ מוכן עם הטקסט והנמען. בזכות חיבור ה-Green-API שלך, המערכת שולחת את התזכורות ודוחות ההורים ישירות ועצמאית ברקע מבלי לפתוח חלון ומבלי שתצטרכי לאשר ידנית!
                                             </p>
                                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                                                 <div>
@@ -2964,43 +3103,6 @@ function App() {
                                             </div>
                                         </div>
                                     </details>
-                                </div>
-
-                                <div className="bg-gradient-to-br from-purple-500/10 via-pink-500/5 to-white p-6 rounded-3xl border border-purple-200 shadow-[0_4px_20px_-4px_rgba(147,51,234,0.08)]">
-                                    <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 mb-4 pb-4 border-b border-purple-100">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-500 to-pink-500 text-white flex items-center justify-center text-2xl shadow-md">🔔</div>
-                                            <div>
-                                                <h2 className="text-xl font-bold text-stone-800 tracking-tight">תזכורות חכמות והתראות מסך נעילה</h2>
-                                                <p className="text-xs text-stone-500 mt-0.5">קבלת תזכורות מעודדות ישירות למסך הנעילה גם כשהאפליקציה סגורה</p>
-                                            </div>
-                                        </div>
-                                        <button 
-                                            onClick={testInstantNotification}
-                                            className="bg-purple-600 hover:bg-purple-700 text-white px-5 py-3 rounded-2xl text-sm font-bold shadow-md shadow-purple-500/20 flex items-center justify-center gap-2 active:scale-95 transition-all">
-                                            <span>⚡</span> שליחת התראת בדיקה עכשיו
-                                        </button>
-                                    </div>
-                                    
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                                        <div className="bg-white/80 backdrop-blur-sm p-4 rounded-2xl border border-purple-100">
-                                            <div className="font-bold text-stone-800 mb-1 flex items-center gap-1.5 text-sm">
-                                                <span>📱</span> איך זה עובד באנדרואיד?
-                                            </div>
-                                            <p className="text-stone-600 leading-relaxed">
-                                                פשוט לוחצים על <b>"בדיקה"</b> ומאשרים קבלת התראות בדפדפן כרום. ההתראות יגיעו ברקע למסך הנעילה גם כשהטאב והדפדפן סגורים לגמרי!
-                                            </p>
-                                        </div>
-
-                                        <div className="bg-white/80 backdrop-blur-sm p-4 rounded-2xl border border-purple-100">
-                                            <div className="font-bold text-stone-800 mb-1 flex items-center gap-1.5 text-sm">
-                                                <span>🍏</span> איך זה עובד באייפון (iOS)?
-                                            </div>
-                                            <p className="text-stone-600 leading-relaxed">
-                                                באייפון פותחים בספארי, לוחצים על כפתור <b>"שתף" (Share)</b> למטה ובוחרים <b>"הוסף למסך הבית"</b>. פותחים מהאייקון במסך הבית ומאשרים התראות — ומקבלים תזכורות במסך הנעילה!
-                                            </p>
-                                        </div>
-                                    </div>
                                 </div>
 
                                 <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)]">
