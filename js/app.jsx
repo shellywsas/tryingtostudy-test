@@ -5138,23 +5138,15 @@ function App() {
 
                                         <button 
                                             onClick={() => {
-                                                toggleSmartReminders(task);
+                                                handleAddTaskToCalendar(task);
                                                 setTaskActionsMenu(null);
                                             }}
-                                            className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all font-bold text-sm active:scale-98 shadow-xs ${
-                                                task.remindersEnabled 
-                                                    ? 'bg-purple-50 hover:bg-purple-100 text-purple-900 border-purple-200' 
-                                                    : 'bg-gradient-to-r from-purple-50 to-pink-50 hover:from-purple-100 hover:to-pink-100 text-purple-900 border-purple-200'
-                                            }`}>
+                                            className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-stone-50 hover:bg-indigo-50 hover:text-indigo-800 text-stone-700 border border-stone-200 hover:border-indigo-200 transition-all font-bold text-sm active:scale-98">
                                             <div className="flex items-center gap-3">
-                                                <span className="text-xl">{task.remindersEnabled ? '🔕' : '🔔'}</span>
-                                                <span>{task.remindersEnabled ? 'ביטול תזכורות אוטומטיות' : 'הפעלת תזכורות חכמות'}</span>
+                                                <span className="text-xl">📅</span>
+                                                <span>הוספה ליומן עם תזכורות</span>
                                             </div>
-                                            <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                                                task.remindersEnabled ? 'bg-purple-200 text-purple-800' : 'bg-purple-100 text-purple-700'
-                                            }`}>
-                                                {task.remindersEnabled ? 'פעיל כעת' : 'בלחיצה אחת ✨'}
-                                            </span>
+                                            <span className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md text-[11px] font-semibold">קובץ ICS ליומן</span>
                                         </button>
 
                                         <button 
