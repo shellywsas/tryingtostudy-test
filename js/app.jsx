@@ -4593,6 +4593,32 @@ function App() {
                                     </button>
                                 </div>
 
+                                {(() => {
+                                    const isStandalone = (typeof window !== 'undefined') && (window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches);
+                                    const perm = typeof Notification !== 'undefined' ? Notification.permission : 'not_supported';
+                                    return (
+                                        <div className="p-3 bg-stone-50 rounded-2xl mb-4 border border-stone-200 text-[11px] text-stone-600 flex flex-col gap-1 shadow-xs">
+                                            <div className="font-bold text-stone-800 text-xs flex items-center gap-1">
+                                                <span>🔍</span> זיהוי מצב המכשיר שלך:
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span>מכשיר שזוהה:</span>
+                                                <b className="text-stone-800">{isIOSDevice ? 'אייפון (iOS) 🍎' : 'אנדרואיד / מחשב 🤖'}</b>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span>נפתח ממסך הבית (אפליקציה):</span>
+                                                <b className={isStandalone ? 'text-emerald-600' : 'text-amber-600'}>{isStandalone ? 'כן (מעולה!) ✅' : 'לא (פתוח בדפדפן הרגיל) ⚠️'}</b>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span>הרשאת התראות בדפדפן:</span>
+                                                <b className={perm === 'granted' ? 'text-emerald-600' : perm === 'denied' ? 'text-rose-600' : 'text-amber-600'}>
+                                                    {perm === 'granted' ? 'מאושר ✅' : perm === 'denied' ? 'חסום ❌' : perm === 'not_supported' ? 'לא נתמך בדפדפן זה ❌' : 'טרם התבקש ⏳'}
+                                                </b>
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+
                                 {/* Tabs */}
                                 <div className="flex gap-2 p-1 bg-stone-100 rounded-2xl mb-4">
                                     <button 
