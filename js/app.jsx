@@ -1113,16 +1113,18 @@ function App() {
 
             const adminCancelPenalty = (user, penaltyLog) => {
                 if (!user || !penaltyLog) return;
-                const refund = Math.abs(penaltyLog.points || 0);
+                const deducted = Math.abs(penaltyLog.points || 0);
+                // החזר כפול (פי 2): החזרת הנקודות שקוזזו בקנס + הענקת נקודות ההגשה שהיו מגיעות
+                const refund = deducted * 2;
                 const newTotal = (user.totalPoints || 0) + refund;
                 const newWeekly = (user.weeklyPoints || 0) + refund;
                 const refundEntry = {
                     id: 'ph_admin_refund_' + Date.now(),
                     taskId: penaltyLog.taskId || '',
-                    taskTitle: penaltyLog.taskTitle || 'ביטול קנס ע״י מנהל',
+                    taskTitle: penaltyLog.taskTitle || 'ביטול קנס והחזר כפול',
                     points: refund,
                     date: new Date().toISOString(),
-                    details: 'ביטול קנס והחזר נקודות ע״י מנהל מערכת'
+                    details: `ביטול קנס (${deducted} נק') והחזרת נקודות הגשה שהיו מגיעות (${deducted} נק') - סה"כ פי 2 (+${refund} נק')`
                 };
                 const newHistory = (user.pointsHistory || []).map(h => h.id === penaltyLog.id ? { ...h, canceled: true } : h);
                 newHistory.unshift(refundEntry);
@@ -1131,6 +1133,7 @@ function App() {
                     weeklyPoints: newWeekly,
                     pointsHistory: newHistory
                 });
+                showToast(`הקנס בוטל והוחזרו פי 2 נקודות (+${refund} נקודות) לחשבון! 💚`, 'success');
             };
 
             const adminRestoreStreak = (user, streakItem) => {
@@ -1189,9 +1192,39 @@ function App() {
             };
 
             const adminResetTaskPenalty = (user, taskId) => {
+                const targetTask = (user.tasks || []).find(t => t.id === taskId);
                 const newTasks = (user.tasks || []).map(t => t.id === taskId ? { ...t, autoPenaltyApplied: false } : t);
-                saveAdminUserUpdate(user.username, { tasks: newTasks });
-                showToast('בוטל סטטוס איחור וקנס למשימה', 'success');
+                
+                let newHistory = [...(user.pointsHistory || [])];
+                const matchingPenalty = newHistory.find(h => h.taskId === taskId && (h.points || 0) < 0 && !h.canceled);
+                const deducted = matchingPenalty ? Math.abs(matchingPenalty.points) : 2;
+                // החזר פי 2: החזרת הקנס שירד + נקודות ההגשה שמגיעות לה
+                const refund = deducted * 2;
+                
+                if (matchingPenalty) {
+                    matchingPenalty.canceled = true;
+                }
+                
+                const refundEntry = {
+                    id: 'ph_admin_refund_' + Date.now(),
+                    taskId: taskId,
+                    taskTitle: targetTask?.title || matchingPenalty?.taskTitle || 'ביטול קנס משימה',
+                    points: refund,
+                    date: new Date().toISOString(),
+                    details: `ביטול קנס משימה והחזר נקודות הגשה כפולות (+${refund} נק') ע״י מנהל`
+                };
+                newHistory.unshift(refundEntry);
+
+                const newTotal = (user.totalPoints || 0) + refund;
+                const newWeekly = (user.weeklyPoints || 0) + refund;
+
+                saveAdminUserUpdate(user.username, { 
+                    tasks: newTasks,
+                    totalPoints: newTotal,
+                    weeklyPoints: newWeekly,
+                    pointsHistory: newHistory
+                });
+                showToast(`בוטל קנס המשימה והוחזרו פי 2 נקודות (+${refund} נק') לחשבון! 💚`, 'success');
             };
 
             const showToast = (text, type = 'info') => {
@@ -3086,8 +3119,9 @@ function App() {
                                                                         </div>
                                                                         <button 
                                                                             onClick={() => adminCancelPenalty(selectedAdminUser, pen)}
-                                                                            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg active:scale-95 transition-all shrink-0">
-                                                                            בטל קנס והחזר {Math.abs(pen.points)} נק' 💚
+                                                                            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg active:scale-95 transition-all shrink-0 shadow-xs"
+                                                                            title="ביטול קנס והחזרת נקודות הגשה (פי 2)">
+                                                                            בטל קנס והחזר פי 2 (+{Math.abs(pen.points) * 2} נק') 💚
                                                                         </button>
                                                                     </div>
                                                                 ))}
@@ -3179,8 +3213,9 @@ function App() {
                                                                 {t.autoPenaltyApplied && (
                                                                     <button 
                                                                         onClick={() => adminResetTaskPenalty(selectedAdminUser, t.id)}
-                                                                        className="text-[11px] bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-1 rounded-lg font-bold">
-                                                                        אפס איחור
+                                                                        className="text-[11px] bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-1 rounded-lg font-bold hover:bg-emerald-100"
+                                                                        title="ביטול קנס והחזרת נקודות הגשה (פי 2)">
+                                                                        בטל קנס (פי 2 נק') 💚
                                                                     </button>
                                                                 )}
                                                                 <button 
