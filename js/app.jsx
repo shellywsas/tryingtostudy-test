@@ -1194,22 +1194,6 @@ function App() {
                 showToast('בוטל סטטוס איחור וקנס למשימה', 'success');
             };
 
-            const adminLoginAsUser = (username) => {
-                const targetUserObj = adminUsersList.find(u => u.username === username);
-                setGlobalState(prev => ({
-                    ...prev,
-                    users: {
-                        ...prev.users,
-                        ...(targetUserObj ? { [username]: targetUserObj } : {})
-                    },
-                    activeUser: username
-                }));
-                sessionStorage.setItem('studystreak_admin_mode', 'true');
-                setIsAdminLoggedIn(false);
-                setSelectedAdminUser(null);
-                showToast(`התחברת כעת כמשתמשת @${username}! (מצב מנהל פעיל) 🚀`, 'success');
-            };
-
             const showToast = (text, type = 'info') => {
                 setToastMessage({ text, type });
                 setTimeout(() => setToastMessage(null), 4000);
@@ -1225,16 +1209,15 @@ function App() {
                 const pass = (e.target.password.value || '').trim();
                 if(!user) return;
 
-                // Admin check - supports 'admin' or 'אדמין' (in English or Hebrew, any case)
+                // Admin check - only accessible with credentials: 'admin' or 'אדמין'
                 const cleanUser = user.toLowerCase();
                 const cleanPass = pass.toLowerCase();
                 const isAdmin = (cleanUser === 'admin' || cleanUser === 'אדמין') && 
                                 (cleanPass === 'admin' || cleanPass === 'אדמין');
                 if (isAdmin) {
-                    sessionStorage.setItem('studystreak_admin_mode', 'true');
                     setIsAdminLoggedIn(true);
                     loadAdminUsers();
-                    showToast('שלום המנהל! התחברת בהצלחה למצב ניהול מערכת (God Mode) 🛡️', 'success');
+                    showToast('ברוך הבא למצב ניהול מערכת (God Mode) 🛡️', 'success');
                     return;
                 }
 
@@ -2944,20 +2927,14 @@ function App() {
                                                                 setAdminPointsInput(u.totalPoints || 0);
                                                                 setAdminWeeklyPointsInput(u.weeklyPoints || 0);
                                                             }} 
-                                                            className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1 active:scale-95 transition-all shadow-xs">
-                                                            <span>👁️</span> מצב אלוהים ועריכה
-                                                        </button>
-                                                        <button 
-                                                            onClick={() => adminLoginAsUser(u.username)} 
-                                                            className="bg-stone-800 hover:bg-stone-900 text-white font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1 active:scale-95 transition-all"
-                                                            title="כניסה לאפליקציה כמשתמשת זו">
-                                                            <span>🚀</span> כניסה כמשתמשת
+                                                            className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-xs">
+                                                            <span>⚡</span> ניהול חשבון (God Mode)
                                                         </button>
                                                         <button 
                                                             onClick={() => { setDeleteConfirmUser(u); setDeleteConfirmStep(1); }} 
-                                                            className="bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold py-2.5 px-3 rounded-xl text-xs border border-rose-200 flex items-center justify-center gap-1 active:scale-95 transition-all"
+                                                            className="bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold py-2.5 px-4 rounded-xl text-xs border border-rose-200 flex items-center justify-center gap-1 active:scale-95 transition-all shrink-0"
                                                             title="מחיקת חשבון מאובטחת">
-                                                            <span>🗑️</span> מחיקה
+                                                            <span>🗑️</span> מחיקה מאובטחת
                                                         </button>
                                                     </div>
                                                 </div>
@@ -3316,22 +3293,6 @@ function App() {
                                 <button type="submit" className="w-full py-4 bg-gradient-to-r from-purple-500 to-fuchsia-500 hover:from-purple-600 hover:to-fuchsia-600 text-white rounded-xl font-bold shadow-md shadow-purple-500/20 transition-all mt-4 text-sm tracking-wide active:scale-95">
                                     כניסה / הרשמה (מסונכרן לענן)
                                 </button>
-                                <div className="pt-2 border-t border-stone-100 mt-3 text-center">
-                                    <button 
-                                        type="button" 
-                                        onClick={() => {
-                                            sessionStorage.setItem('studystreak_admin_mode', 'true');
-                                            setIsAdminLoggedIn(true);
-                                            loadAdminUsers();
-                                            showToast('ברוך הבא למצב ניהול מערכת (God Mode) 🛡️', 'success');
-                                        }}
-                                        className="w-full py-3 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-xl font-bold text-xs transition-colors flex items-center justify-center gap-2 active:scale-95 shadow-xs">
-                                        <span>🛡️</span> כניסה ישירה כמנהל מערכת (אדמין / אדמין)
-                                    </button>
-                                    <div className="text-[11px] text-stone-400 mt-2 font-medium">
-                                        או הקלידי בטופס שם משתמש: <span className="font-bold text-stone-600">אדמין</span> וסיסמה: <span className="font-bold text-stone-600">אדמין</span>
-                                    </div>
-                                </div>
                             </form>
                             <div className="text-center text-[11px] text-stone-400 mt-6 font-medium relative z-10">
                                 משתמשת חדשה? הקלידי שם וסיסמה והחשבון ייווצר בענן.
@@ -3398,26 +3359,7 @@ function App() {
             const safeStreakHistory = activeUserData.streakHistory || [];
 
             return (
-                <div className="min-h-screen flex flex-col pb-24 md:pb-0 no-print" dir="rtl">
-                    {sessionStorage.getItem('studystreak_admin_mode') === 'true' && (
-                        <div className="bg-stone-900 text-white px-4 py-2.5 text-xs font-bold flex items-center justify-between shadow-lg sticky top-0 z-[9999] border-b border-purple-500/40 w-full" dir="rtl">
-                            <div className="flex items-center gap-2">
-                                <span className="text-base">🛡️</span>
-                                <span>מחובר כמנהל מערכת (צפייה כמשתמשת: <span className="text-purple-300 font-bold">@{globalState.activeUser}</span>)</span>
-                            </div>
-                            <button 
-                                onClick={() => {
-                                    setGlobalState(prev => ({ ...prev, activeUser: null }));
-                                    setIsAdminLoggedIn(true);
-                                    loadAdminUsers();
-                                }}
-                                className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition-all shadow-sm active:scale-95 flex items-center gap-1.5">
-                                <span>🔙</span> חזרה לפאנל אדמין (God Mode)
-                            </button>
-                        </div>
-                    )}
-                    
-                    <div className="flex-1 flex flex-col md:flex-row">
+                <div className="min-h-screen flex flex-col md:flex-row pb-24 md:pb-0 no-print" dir="rtl">
                     
                     {toastMessage && (
                         <div className="fixed top-safe-top left-1/2 -translate-x-1/2 mt-4 z-[80] max-w-sm w-11/12 animate-[bounce_0.5s_ease-out]">
@@ -6389,7 +6331,6 @@ function App() {
                         </div>
                     )}
 
-                    </div>
                 </div>
             );
         }
