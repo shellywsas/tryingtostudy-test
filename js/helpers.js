@@ -332,3 +332,23 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             }
             return { isPassed: false, text: `עוד ${diffDays} ימים`, badgeClass: 'bg-stone-50 text-stone-600 border border-stone-200' };
         };
+
+        const formatPastExamDate = (examDateStr) => {
+            if (!examDateStr) return '';
+            try {
+                const target = new Date(examDateStr);
+                target.setHours(0, 0, 0, 0);
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const diffDays = Math.round((today.getTime() - target.getTime()) / (1000 * 60 * 60 * 24));
+                if (diffDays === 0) return 'התקיים היום';
+                if (diffDays === 1) return 'התקיים אתמול';
+                if (diffDays < 7) return `התקיים לפני ${diffDays} ימים`;
+                if (diffDays < 14) return 'התקיים לפני שבוע';
+                if (diffDays < 30) return `התקיים לפני ${Math.floor(diffDays / 7)} שבועות`;
+                if (diffDays < 60) return 'התקיים לפני כחודש';
+                return `התקיים ב-${target.toLocaleDateString('he-IL')}`;
+            } catch (e) {
+                return examDateStr;
+            }
+        };
