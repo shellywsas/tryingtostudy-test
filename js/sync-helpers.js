@@ -77,20 +77,69 @@
         return Array.from(byId.values());
     }
 
+    function getLastSaturday22PM(now) {
+        const nowDate = now instanceof Date ? now : new Date(now || Date.now());
+        const d = nowDate.getDay(); // 0 = Sun, ..., 6 = Sat
+        const target = new Date(nowDate);
+        if (d === 6) {
+            if (nowDate.getHours() < 22) {
+                target.setDate(nowDate.getDate() - 7);
+                target.setHours(22, 0, 0, 0);
+                return target.getTime();
+            } else {
+                target.setHours(22, 0, 0, 0);
+                return target.getTime();
+            }
+        }
+        const daysBack = d + 1;
+        target.setDate(nowDate.getDate() - daysBack);
+        target.setHours(22, 0, 0, 0);
+        return target.getTime();
+    }
+
+    function normalizeBadge(b) {
+        if (!b) return null;
+        if (typeof b === 'string') return { id: b, earnedAt: new Date().toISOString() };
+        if (b && b.id) return b;
+        return null;
+    }
+
+    function mergeBadges(localBadges, remoteBadges) {
+        const listA = (Array.isArray(localBadges) ? localBadges : []).map(normalizeBadge).filter(Boolean);
+        const listB = (Array.isArray(remoteBadges) ? remoteBadges : []).map(normalizeBadge).filter(Boolean);
+        const map = new Map();
+        [...listB, ...listA].forEach(b => {
+            const existing = map.get(b.id);
+            if (!existing) {
+                map.set(b.id, b);
+            } else {
+                map.set(b.id, {
+                    ...existing,
+                    ...b,
+                    count: Math.max(existing.count || 1, b.count || 1)
+                });
+            }
+        });
+        return Array.from(map.values());
+    }
+
     function applyRemoteUser(local, remote, tabWrittenSync) {
         if (!remote) return local;
         if (!local) return remote;
         const remoteSync = remote.lastSync || 0;
         const localSync = local.lastSync || 0;
+        const mergedBadges = mergeBadges(local.badges, remote.badges);
+
         if (tabWrittenSync && remoteSync && remoteSync <= tabWrittenSync) {
-            return local;
+            return { ...local, badges: mergedBadges };
         }
-        if (!remoteSync && localSync) return local;
-        if (remoteSync && localSync && remoteSync < localSync) return local;
-        if (remoteSync && localSync && remoteSync === localSync) return local;
+        if (!remoteSync && localSync) return { ...local, badges: mergedBadges };
+        if (remoteSync && localSync && remoteSync < localSync) return { ...local, badges: mergedBadges };
+        if (remoteSync && localSync && remoteSync === localSync) return { ...local, badges: mergedBadges };
         const hist = local.pointsHistory || remote.pointsHistory || [];
         return {
             ...remote,
+            badges: mergedBadges,
             tasks: mergeTasks(local.tasks || [], remote.tasks || [], hist),
         };
     }
@@ -104,6 +153,7 @@
         let taskStreak = user.taskStreak;
         let streakHistory = [...(user.streakHistory || [])];
         let newHist = [...hist];
+        const weekStart = getLastSaturday22PM();
 
         const tasks = user.tasks.map((t) => {
             if (!t) return t;
@@ -144,7 +194,9 @@
                         const delta = points - (updated.pointsEarned || 0);
                         if (delta > 0) {
                             totalPoints += delta;
-                            weeklyPoints += delta;
+                            if (subDate.getTime() >= weekStart) {
+                                weeklyPoints += delta;
+                            }
                             updated.pointsEarned = points;
                             changed = true;
                         }
@@ -154,7 +206,10 @@
                     if (autoPenaltyLogs.length > 0) {
                         const refundedPoints = autoPenaltyLogs.reduce((sum, h) => sum + Math.abs(h.points || 0), 0);
                         totalPoints += refundedPoints;
-                        weeklyPoints += refundedPoints;
+                        const newestLogTime = Math.max(...autoPenaltyLogs.map(h => h.date ? new Date(h.date).getTime() : 0));
+                        if (newestLogTime >= weekStart) {
+                            weeklyPoints += refundedPoints;
+                        }
                         newHist = newHist.filter(h => !(h && h.taskId === updated.id && isAutoHistoryId(h.id) && (h.points || 0) < 0));
                         changed = true;
                     }
@@ -185,6 +240,22 @@
 
             return updated;
         });
+
+        // Self-healing: if user has weeklyPoints > 0 but has not completed tasks or earned positive points this week, heal to 0!
+        const hasPositiveActivityThisWeek = tasks.some(t => {
+            if (!t || !t.completed || !t.completedAt) return false;
+            const tTime = new Date(t.completedAt).getTime();
+            return !isNaN(tTime) && tTime >= weekStart;
+        }) || newHist.some(h => {
+            if (!h || !h.date || h.canceled || (h.points || 0) <= 0) return false;
+            const hTime = new Date(h.date).getTime();
+            return !isNaN(hTime) && hTime >= weekStart;
+        });
+
+        if (!hasPositiveActivityThisWeek && weeklyPoints > 0) {
+            weeklyPoints = 0;
+            changed = true;
+        }
 
         if (!changed) return user;
 
@@ -223,15 +294,18 @@
         if (autoLogs.length && !alreadyRefunded) {
             const refund = autoLogs.reduce((s, h) => s + Math.abs(h.points), 0);
             totalPoints += refund;
-            weeklyPoints += refund;
             const sample = autoLogs[0];
+            const sampleTime = sample && sample.date ? new Date(sample.date).getTime() : nowDate.getTime();
+            if (sampleTime >= getLastSaturday22PM(nowDate)) {
+                weeklyPoints += refund;
+            }
             pointsHistory = [
                 {
                     id: "ph_refund_" + taskId,
                     taskId: taskId,
-                    taskTitle: sample.taskTitle,
-                    subjectName: sample.subjectName,
-                    subjectEmoji: sample.subjectEmoji,
+                    taskTitle: sample ? sample.taskTitle : "",
+                    subjectName: sample ? sample.subjectName : "",
+                    subjectEmoji: sample ? sample.subjectEmoji : "",
                     points: refund,
                     date: nowDate.toISOString(),
                     details: "החזר קנס אוטומטי אחרי עדכון תאריך הגשה",
@@ -274,6 +348,9 @@
         taskLooksCompleted,
         isTaskSubmittedOnTime,
         isAutoHistoryId,
+        getLastSaturday22PM,
+        normalizeBadge,
+        mergeBadges,
     };
 
     if (typeof module !== "undefined" && module.exports) {
@@ -285,4 +362,7 @@
     root.restoreOnDueEdit = restoreOnDueEdit;
     root.taskLooksCompleted = taskLooksCompleted;
     root.isTaskSubmittedOnTime = isTaskSubmittedOnTime;
+    root.getLastSaturday22PM = getLastSaturday22PM;
+    root.normalizeBadge = normalizeBadge;
+    root.mergeBadges = mergeBadges;
 })(typeof globalThis !== "undefined" ? globalThis : this);

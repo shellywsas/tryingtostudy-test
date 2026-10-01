@@ -37,7 +37,28 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             return target.getTime();
         };
 
+        const getLastSaturday22PM = (nowInput) => {
+            const now = nowInput instanceof Date ? nowInput : new Date(nowInput || Date.now());
+            const d = now.getDay();
+            const target = new Date(now);
+            if (d === 6) {
+                if (now.getHours() < 22) {
+                    target.setDate(now.getDate() - 7);
+                    target.setHours(22, 0, 0, 0);
+                    return target.getTime();
+                } else {
+                    target.setHours(22, 0, 0, 0);
+                    return target.getTime();
+                }
+            }
+            const daysBack = d + 1;
+            target.setDate(now.getDate() - daysBack);
+            target.setHours(22, 0, 0, 0);
+            return target.getTime();
+        };
+
         const getNextSaturdayNight = getNextSaturday22PM;
+        const getLastSaturdayNight = getLastSaturday22PM;
 
 
         const timeToMins = (t) => {

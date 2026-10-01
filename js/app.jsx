@@ -136,12 +136,13 @@ function App() {
 
             const checkAndAwardBadges = (userData) => {
                 if(!userData) return userData;
-                let newBadges = [...(userData.badges || [])];
+                let newBadges = [...(userData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : b));
                 let earnedNew = false;
                 
-                const exam90PlusBadge = newBadges.find(b => b.id === 'b_exam_90');
-                if (!exam90PlusBadge) {
-                    const exams90PlusCount = (userData.exams || []).filter(e => e.grade && e.grade >= 90).length;
+                const hasBadge = (id) => newBadges.some(b => b.id === id);
+                
+                if (!hasBadge('b_exam_90')) {
+                    const exams90PlusCount = (userData.exams || []).filter(e => e.grade && Number(e.grade) >= 90).length;
                     if (exams90PlusCount >= 4) {
                         newBadges.push({ id: 'b_exam_90', earnedAt: new Date().toISOString() });
                         earnedNew = true;
@@ -149,24 +150,21 @@ function App() {
                     }
                 }
                 
-                const turboBadge = newBadges.find(b => b.id === 'b_weekly_20');
-                if(!turboBadge) {
-                    if (userData.highestWeeklyPoints >= 20 || userData.weeklyPoints >= 20) {
+                if (!hasBadge('b_weekly_20')) {
+                    if ((userData.highestWeeklyPoints || 0) >= 20 || (userData.weeklyPoints || 0) >= 20) {
                         newBadges.push({ id: 'b_weekly_20', earnedAt: new Date().toISOString() });
                         earnedNew = true;
                         showToast('⚡ זכית בתג: טורבו!', 'success');
                     }
                 }
                 
-                const onTimeBadge = newBadges.find(b => b.id === 'b_on_time');
-                if(!onTimeBadge) {
-                    if (userData.longestStreak >= 14) {
+                if (!hasBadge('b_on_time')) {
+                    if ((userData.longestStreak || 0) >= 14 || (userData.taskStreak || 0) >= 14) {
                         newBadges.push({ id: 'b_on_time', earnedAt: new Date().toISOString() });
                         earnedNew = true;
                         showToast('⏱️ זכית בתג: חסינת איחורים!', 'success');
                     }
                 }
-
 
                 if (earnedNew) {
                     return { ...userData, badges: newBadges };
@@ -176,61 +174,86 @@ function App() {
 
 
             useEffect(() => {
-                if (activeUserData && globalState.activeUser) {
-                    const now = new Date().getTime();
-                    if (now > (activeUserData.nextWeeklyReset || 0)) {
-                        const userWeeklyPts = activeUserData.weeklyPoints || 0;
-                        const friendsArr = Object.values(liveFriends || {});
-                        let isTop = true;
-                        let topFriendName = '';
-                        let topFriendPts = 0;
+                if (!activeUserData || !globalState.activeUser) return;
+                const now = new Date().getTime();
+                const weekStart = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
+                
+                // 1. Regular weekly reset on Saturday 22:00
+                if (now > (activeUserData.nextWeeklyReset || 0)) {
+                    const userWeeklyPts = activeUserData.weeklyPoints || 0;
+                    const friendsArr = Object.values(liveFriends || {});
+                    let isTop = true;
+                    let topFriendName = '';
+                    let topFriendPts = 0;
 
-                        friendsArr.forEach(f => {
-                            const fPts = f.weeklyPoints || 0;
-                            if (fPts > userWeeklyPts) {
-                                isTop = false;
-                                if (fPts > topFriendPts) {
-                                    topFriendPts = fPts;
-                                    topFriendName = f.name || f.username;
-                                }
+                    friendsArr.forEach(f => {
+                        const fPts = f.weeklyPoints || 0;
+                        if (fPts > userWeeklyPts) {
+                            isTop = false;
+                            if (fPts > topFriendPts) {
+                                topFriendPts = fPts;
+                                topFriendName = f.name || f.username;
                             }
-                        });
-
-                        let updatedBadges = [...(activeUserData.badges || [])];
-                        let wonCrown = false;
-
-                        if (isTop && userWeeklyPts > 0) {
-                            wonCrown = true;
-                            const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
-                            if (champBadgeIdx !== -1) {
-                                updatedBadges[champBadgeIdx] = {
-                                    ...updatedBadges[champBadgeIdx],
-                                    count: (updatedBadges[champBadgeIdx].count || 1) + 1,
-                                    lastWonAt: new Date().toISOString()
-                                };
-                            } else {
-                                updatedBadges.push({
-                                    id: 'b_weekly_champ',
-                                    count: 1,
-                                    earnedAt: new Date().toISOString()
-                                });
-                            }
-                            showToast(`👑 מזל טוב! הוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! זכית בתג אלופת השבוע! 👑`, 'success');
-                        } else if (topFriendName && topFriendPts > 0) {
-                            showToast(`סיום שבוע! אלופת השבוע החולף היא ${topFriendName} עם ${topFriendPts} נק' 👑`, 'info');
                         }
+                    });
 
+                    let updatedBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : b));
+                    let wonCrown = false;
+
+                    if (isTop && userWeeklyPts > 0) {
+                        wonCrown = true;
+                        const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
+                        if (champBadgeIdx !== -1) {
+                            updatedBadges[champBadgeIdx] = {
+                                ...updatedBadges[champBadgeIdx],
+                                count: (updatedBadges[champBadgeIdx].count || 1) + 1,
+                                lastWonAt: new Date().toISOString()
+                            };
+                        } else {
+                            updatedBadges.push({
+                                id: 'b_weekly_champ',
+                                count: 1,
+                                earnedAt: new Date().toISOString()
+                            });
+                        }
+                        showToast(`👑 מזל טוב! הוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! זכית בתג אלופת השבוע! 👑`, 'success');
+                    } else if (topFriendName && topFriendPts > 0) {
+                        showToast(`סיום שבוע! אלופת השבוע החולף היא ${topFriendName} עם ${topFriendPts} נק' 👑`, 'info');
+                    }
+
+                    updateUserData(prev => ({
+                        ...prev,
+                        highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, prev.weeklyPoints || 0),
+                        lastWeekPoints: prev.weeklyPoints || 0,
+                        weeklyPoints: 0,
+                        nextWeeklyReset: getNextSaturday22PM(),
+                        badges: wonCrown ? updatedBadges : (prev.badges || [])
+                    }));
+                    return;
+                }
+
+                // 2. Self-healing check: if weeklyPoints > 0 but user has not done any tasks or earned points since the start of this week, heal to 0
+                if ((activeUserData.weeklyPoints || 0) > 0) {
+                    const tasks = activeUserData.tasks || [];
+                    const hist = activeUserData.pointsHistory || [];
+                    const hasPositiveActivityThisWeek = tasks.some(t => {
+                        if (!t || !t.completed || !t.completedAt) return false;
+                        const tTime = new Date(t.completedAt).getTime();
+                        return !isNaN(tTime) && tTime >= weekStart;
+                    }) || hist.some(h => {
+                        if (!h || !h.date || h.canceled || (h.points || 0) <= 0) return false;
+                        const hTime = new Date(h.date).getTime();
+                        return !isNaN(hTime) && hTime >= weekStart;
+                    });
+
+                    if (!hasPositiveActivityThisWeek) {
                         updateUserData(prev => ({
                             ...prev,
-                            highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, prev.weeklyPoints || 0),
-                            lastWeekPoints: prev.weeklyPoints || 0,
-                            weeklyPoints: 0,
-                            nextWeeklyReset: getNextSaturday22PM(),
-                            badges: wonCrown ? updatedBadges : (prev.badges || [])
+                            weeklyPoints: 0
                         }));
                     }
                 }
-            }, [globalState.activeUser, activeUserData?.nextWeeklyReset]);
+            }, [globalState.activeUser, activeUserData?.nextWeeklyReset, activeUserData?.weeklyPoints]);
 
 
             useEffect(() => {
@@ -899,21 +922,21 @@ function App() {
             
             // תוקן החיבור למסד הנתונים של חברים - פועל ברקע ומכניס את ה-username פנימה!
             useEffect(() => {
-                if (activeUserData?.friends?.length > 0 && typeof db !== 'undefined') {
+                if (activeUserData?.friends?.length > 0 && typeof db !== 'undefined' && db) {
                     const unsubscribes = [];
-                    // מניעת כפילויות בהאזנה על ידי שימוש בסט של שמות משתמש
-                    const friendUsernames = [...new Set(activeUserData.friends.map(f => f.username))];
+                    const friendUsernames = [...new Set(activeUserData.friends.map(f => f && f.username).filter(Boolean))];
                     
                     friendUsernames.forEach(username => {
                         try {
                             const unsub = db.collection("users").doc(username).onSnapshot(doc => {
                                 if (doc.exists) {
-                                    // מכניסים את השם המשתמש במפורש פנימה אל תוך הדאטה!
                                     setLiveFriends(prev => ({
                                         ...prev, 
                                         [username]: { ...doc.data(), username: username }
                                     }));
                                 }
+                            }, err => {
+                                console.warn(`Error listening to friend @${username}:`, err);
                             });
                             unsubscribes.push(unsub);
                         } catch (e) { console.error(e); }
@@ -921,7 +944,7 @@ function App() {
                     
                     return () => { unsubscribes.forEach(u => u && u()); };
                 }
-            }, [activeUserData?.friends]);
+            }, [activeUserData?.friends ? activeUserData.friends.map(f => f && f.username).sort().join(',') : '']);
 
 
             useEffect(() => {
@@ -1113,8 +1136,12 @@ function App() {
             const saveAdminUserUpdate = async (username, updatedFields) => {
                 if (!username) return;
                 try {
+                    const fieldsWithSync = {
+                        ...updatedFields,
+                        lastSync: Date.now()
+                    };
                     if (db) {
-                        await db.collection("users").doc(username).set(updatedFields, { merge: true });
+                        await db.collection("users").doc(username).set(fieldsWithSync, { merge: true });
                     }
                     setGlobalState(prev => {
                         const existing = prev.users[username] || {};
@@ -1122,17 +1149,51 @@ function App() {
                             ...prev,
                             users: {
                                 ...prev.users,
-                                [username]: { ...existing, ...updatedFields }
+                                [username]: { ...existing, ...fieldsWithSync }
                             }
                         };
                     });
-                    setAdminUsersList(prev => prev.map(u => u.username === username ? { ...u, ...updatedFields } : u));
-                    setSelectedAdminUser(prev => prev && prev.username === username ? { ...prev, ...updatedFields } : prev);
+                    setAdminUsersList(prev => prev.map(u => u.username === username ? { ...u, ...fieldsWithSync } : u));
+                    setSelectedAdminUser(prev => prev && prev.username === username ? { ...prev, ...fieldsWithSync } : prev);
                     showToast(`השינויים נשמרו בהצלחה עבור @${username} ✨`, 'success');
                 } catch(err) {
                     console.error("Error updating user from admin:", err);
                     showToast('שגיאה בשמירת הנתונים', 'error');
                 }
+            };
+
+            // Real-time listener for Admin panel to ensure God Mode data is always 100% in sync without flickering
+            useEffect(() => {
+                if (!isAdminLoggedIn || !db) return;
+                const unsub = db.collection("users").onSnapshot((snapshot) => {
+                    const map = {};
+                    snapshot.forEach(doc => {
+                        const data = doc.data();
+                        if (data && doc.id) {
+                            map[doc.id] = { ...data, username: doc.id };
+                        }
+                    });
+                    setAdminUsersList(Object.values(map));
+                    setSelectedAdminUser(prev => prev ? (map[prev.username] || prev) : null);
+                }, (err) => {
+                    console.warn("Admin live sync listener error:", err);
+                });
+                return () => unsub();
+            }, [isAdminLoggedIn]);
+
+            const adminToggleBadge = (user, badgeId) => {
+                if (!user || !badgeId) return;
+                let currentBadges = Array.isArray(user.badges) ? [...user.badges] : [];
+                const idx = currentBadges.findIndex(b => (typeof b === 'string' ? b === badgeId : b?.id === badgeId));
+                let newBadges;
+                if (idx !== -1) {
+                    newBadges = currentBadges.filter((_, i) => i !== idx);
+                    showToast(`התג הוסר מחשבונה של @${user.username}`, 'info');
+                } else {
+                    newBadges = [...currentBadges, { id: badgeId, earnedAt: new Date().toISOString() }];
+                    showToast(`התג הוענק בהצלחה ל-@${user.username}! 🏅`, 'success');
+                }
+                saveAdminUserUpdate(user.username, { badges: newBadges });
             };
 
             const adminDeleteUser = async (username) => {
@@ -1834,44 +1895,79 @@ function App() {
             };
 
 
-            const handleAddFriend = (e) => {
+            const handleAddFriend = async (e) => {
                 e.preventDefault();
-                const username = e.target.username.value.trim();
-                if(!username) return;
+                const rawInput = (e.target.username.value || '').trim();
+                const cleanInput = rawInput.replace(/^@+/, '').trim();
+                if (!cleanInput) return;
 
-
-                if (username === globalState.activeUser) {
+                if (cleanInput.toLowerCase() === (globalState.activeUser || '').toLowerCase()) {
                     showToast('אי אפשר להוסיף את עצמך 😅', 'warning');
                     return;
                 }
                 
-                if (activeUserData.friends.some(f => f.username === username)) {
+                if ((activeUserData.friends || []).some(f => f && f.username && f.username.toLowerCase() === cleanInput.toLowerCase())) {
                     showToast('המשתמש/ת כבר ברשימת החברות שלך!', 'warning');
                     return;
                 }
 
+                if (typeof db !== 'undefined' && db) {
+                    try {
+                        let targetDoc = null;
+                        const directDoc = await db.collection("users").doc(cleanInput).get();
+                        if (directDoc.exists) {
+                            targetDoc = directDoc;
+                        } else {
+                            // Case-insensitive lookup fallback
+                            const allUsersSnap = await db.collection("users").get();
+                            allUsersSnap.forEach(d => {
+                                if (d.id && d.id.toLowerCase() === cleanInput.toLowerCase()) {
+                                    targetDoc = d;
+                                }
+                            });
+                        }
 
-                if (typeof db !== 'undefined') {
-                    db.collection("users").doc(username).get().then((doc) => {
-                        if (doc.exists) {
-                            const friendData = doc.data();
+                        if (targetDoc && targetDoc.exists) {
+                            const targetUsername = targetDoc.id;
+                            const friendData = targetDoc.data();
                             const newFriend = {
                                 id: 'f_' + Date.now(),
-                                username: username,
-                                name: friendData.name || username
+                                username: targetUsername,
+                                name: friendData.name || targetUsername
                             };
-                            updateUserData(prev => ({ ...prev, friends: [...prev.friends, newFriend] }));
-                            toggleModal('addFriend', false);
-                            showToast(`איזה כיף! ${friendData.name || username} התווסף/ה לרשימה.`, 'success');
                             
-                            // שינוי קריטי: הוספת username פנימה ישר בעת ההוספה.
-                            setLiveFriends(prev => ({...prev, [username]: { ...friendData, username: username }}));
+                            // 1. Add friend to active user's friends list
+                            updateUserData(prev => ({ ...prev, friends: [...(prev.friends || []), newFriend] }));
+                            toggleModal('addFriend', false);
+                            showToast(`איזה כיף! ${friendData.name || targetUsername} התווסף/ה לרשימה ✨`, 'success');
+                            
+                            // 2. Immediately populate liveFriends with fresh data
+                            setLiveFriends(prev => ({...prev, [targetUsername]: { ...friendData, username: targetUsername }}));
+
+                            // 3. Mutual friendship: automatically add active user to friend's friends list too!
+                            try {
+                                const friendExistingFriends = Array.isArray(friendData.friends) ? friendData.friends : [];
+                                if (!friendExistingFriends.some(f => f && f.username && f.username.toLowerCase() === (globalState.activeUser || '').toLowerCase())) {
+                                    const reciprocalFriend = {
+                                        id: 'f_' + Date.now() + '_recip',
+                                        username: globalState.activeUser,
+                                        name: activeUserData.name || globalState.activeUser
+                                    };
+                                    await db.collection("users").doc(targetUsername).update({
+                                        friends: [...friendExistingFriends, reciprocalFriend],
+                                        lastSync: Date.now()
+                                    });
+                                }
+                            } catch (mutualErr) {
+                                console.warn("Could not auto-add reciprocal friend:", mutualErr);
+                            }
                         } else {
                             showToast('לא קיים משתמש עם השם הזה במערכת 😢', 'error');
                         }
-                    }).catch(err => {
+                    } catch (err) {
+                        console.error("Error adding friend:", err);
                         showToast('שגיאה בתקשורת עם השרת', 'error');
-                    });
+                    }
                 }
             };
 
@@ -3130,6 +3226,7 @@ function App() {
                                                 { id: 'points', label: 'נקודות וקנסות 💰' },
                                                 { id: 'streaks', label: 'רצפים ושחזור 🔥' },
                                                 { id: 'tasks', label: 'משימות 📋' },
+                                                { id: 'badges', label: 'תגים והישגים 🏅' },
                                                 { id: 'profile', label: 'פרטים אישיים 👤' }
                                             ].map(t => (
                                                 <button 
@@ -3308,6 +3405,46 @@ function App() {
                                                             </div>
                                                         </div>
                                                     ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {adminInspectorTab === 'badges' && (
+                                            <div className="space-y-4">
+                                                <div className="flex items-center justify-between">
+                                                    <h4 className="font-bold text-sm text-stone-800">ניהול תגים והישגים 🏅</h4>
+                                                    <span className="text-xs text-stone-400 font-medium">הענקת תג או הסרתו בלחיצה</span>
+                                                </div>
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-80 overflow-y-auto custom-scrollbar">
+                                                    {ALL_BADGES.map(badge => {
+                                                        const userBadges = Array.isArray(selectedAdminUser.badges) ? selectedAdminUser.badges : [];
+                                                        const hasIt = userBadges.some(b => (typeof b === 'string' ? b === badge.id : b?.id === badge.id));
+                                                        return (
+                                                            <div key={badge.id} className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 transition-all ${
+                                                                hasIt ? 'bg-amber-50/80 border-amber-200' : 'bg-stone-50 border-stone-200 opacity-70'
+                                                            }`}>
+                                                                <div className="flex items-center gap-3">
+                                                                    <span className="text-2xl">{badge.icon}</span>
+                                                                    <div>
+                                                                        <div className="font-bold text-xs text-stone-800 flex items-center gap-1.5">
+                                                                            {badge.title}
+                                                                            {hasIt && <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded-full">פעיל</span>}
+                                                                        </div>
+                                                                        <div className="text-[10px] text-stone-500 mt-0.5 line-clamp-1">{badge.description}</div>
+                                                                    </div>
+                                                                </div>
+                                                                <button 
+                                                                    onClick={() => adminToggleBadge(selectedAdminUser, badge.id)}
+                                                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 active:scale-95 shadow-xs ${
+                                                                        hasIt 
+                                                                            ? 'bg-rose-100 hover:bg-rose-200 text-rose-700' 
+                                                                            : 'bg-purple-600 hover:bg-purple-700 text-white'
+                                                                    }`}>
+                                                                    {hasIt ? 'הסר תג ❌' : 'הענק תג ✨'}
+                                                                </button>
+                                                            </div>
+                                                        );
+                                                    })}
                                                 </div>
                                             </div>
                                         )}
@@ -5269,10 +5406,20 @@ function App() {
                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                                     {activeUserData.friends.map(friend => {
                                         const liveData = liveFriends[friend.username] || {};
-                                        const displayStreak = liveData.taskStreak !== undefined ? liveData.taskStreak : (friend.streak || 0);
+                                        const displayStreak = liveData.taskStreak !== undefined ? liveData.taskStreak : (liveData.streak !== undefined ? liveData.streak : (friend.streak || friend.taskStreak || 0));
                                         
                                         return (
-                                        <div key={friend.id} className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] border border-stone-100 cursor-pointer hover:border-purple-300 hover:shadow-lg transition-all group relative overflow-hidden active:scale-95" onClick={() => { setActiveFriend(friend); toggleModal('friend', true); }}>
+                                        <div key={friend.id} className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] border border-stone-100 cursor-pointer hover:border-purple-300 hover:shadow-lg transition-all group relative overflow-hidden active:scale-95" onClick={() => {
+                                            setActiveFriend(friend);
+                                            if (!liveFriends[friend.username] && typeof db !== 'undefined' && db) {
+                                                db.collection("users").doc(friend.username).get().then(doc => {
+                                                    if (doc.exists) {
+                                                        setLiveFriends(prev => ({ ...prev, [friend.username]: { ...doc.data(), username: friend.username } }));
+                                                    }
+                                                }).catch(e => console.warn(e));
+                                            }
+                                            toggleModal('friend', true);
+                                        }}>
                                             <div className="absolute top-0 right-0 w-20 h-20 bg-purple-50 rounded-bl-full -mr-10 -mt-10 transition-transform group-hover:scale-150 pointer-events-none"></div>
                                             <div className="flex items-center gap-4 relative z-10">
                                                 <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-100 to-rose-100 flex items-center justify-center text-xl font-black text-purple-700 shadow-sm border border-white">
@@ -5352,7 +5499,7 @@ function App() {
                                         <h3 className="font-bold text-lg mb-4 text-stone-800">ארון התגים 🏅</h3>
                                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                             {ALL_BADGES.map(badge => {
-                                                const earned = userBadges.find(b => b.id === badge.id);
+                                                const earned = userBadges.find(b => (typeof b === 'string' ? b === badge.id : b?.id === badge.id));
                                                 return (
                                                     <div key={badge.id} className={`p-4 rounded-2xl border text-center transition-all ${earned ? 'bg-gradient-to-b from-amber-50 to-orange-50 border-amber-200 shadow-sm' : 'bg-stone-50 border-stone-200 opacity-60 grayscale'}`}>
                                                         <div className="text-3xl mb-2 drop-shadow-sm">{badge.icon}</div>
@@ -6174,8 +6321,8 @@ function App() {
 
                     {modals.friend && activeFriend && (() => {
                         const liveData = liveFriends[activeFriend.username] || {};
-                        const displayStreak = liveData.taskStreak !== undefined ? liveData.taskStreak : (activeFriend.streak || 0);
-                        const displayPoints = liveData.totalPoints !== undefined ? liveData.totalPoints : (activeFriend.points || 0);
+                        const displayStreak = liveData.taskStreak !== undefined ? liveData.taskStreak : (liveData.streak !== undefined ? liveData.streak : (activeFriend.streak || activeFriend.taskStreak || 0));
+                        const displayPoints = liveData.totalPoints !== undefined ? liveData.totalPoints : (activeFriend.points || activeFriend.totalPoints || 0);
                         const allFriendTasks = liveData.tasks || activeFriend.tasks || [];
                         const pendingTasks = allFriendTasks.filter(t => !t.completed);
                         const completedCount = allFriendTasks.filter(t => t.completed).length;
@@ -6218,7 +6365,7 @@ function App() {
                                     {(() => {
                                         const fBadges = liveData.badges || activeFriend.badges || [];
                                         const earnedBadges = ALL_BADGES.map(badge => {
-                                            const earned = fBadges.find(b => b.id === badge.id);
+                                            const earned = fBadges.find(b => (typeof b === 'string' ? b === badge.id : b?.id === badge.id));
                                             return earned ? { ...badge, count: earned.count || 1 } : null;
                                         }).filter(Boolean);
 
