@@ -118,6 +118,13 @@ function App() {
                             const cleanData = sanitizeForFirestore(updatedUser);
                             db.collection("users").doc(prev.activeUser).set(cleanData, { merge: true })
                               .catch(err => console.error("Error saving to Firebase: ", err));
+
+                            // Mirror sync for שלי and שליי to guarantee zero data divergence
+                            if (prev.activeUser === 'שלי' || prev.activeUser === 'שליי') {
+                                const mirrorDoc = prev.activeUser === 'שלי' ? 'שליי' : 'שלי';
+                                db.collection("users").doc(mirrorDoc).set(cleanData, { merge: true })
+                                  .catch(err => console.error("Error mirroring to Firebase: ", err));
+                            }
                         } catch (err) {
                             console.error("Firebase sync error (prevented app crash): ", err);
                         }
@@ -289,7 +296,10 @@ function App() {
                         const dueDate = new Date(`${task.dueDate}T${timeStr}`);
                         if (isNaN(dueDate.getTime())) return task;
 
-                        if (now.getTime() > (dueDate.getTime() + GRACE_PERIOD_MS) && (healedPrev.taskStreak || 0) > 0) {
+                        const streakStartMs = healedPrev.currentStreakStart ? new Date(healedPrev.currentStreakStart).getTime() : 0;
+                        const isTaskRelevantForStreak = !streakStartMs || dueDate.getTime() >= (streakStartMs - 86400000);
+
+                        if (isTaskRelevantForStreak && now.getTime() > (dueDate.getTime() + GRACE_PERIOD_MS) && (healedPrev.taskStreak || 0) > 0) {
                             shouldBreakStreak = true;
                             if (!oldestUncompletedDate || dueDate < oldestUncompletedDate) {
                                 oldestUncompletedDate = dueDate;
@@ -297,7 +307,8 @@ function App() {
                             }
                         }
                         const hoursLate = (now.getTime() - dueDate.getTime()) / (1000 * 60 * 60);
-                        if (hoursLate >= 3 && !task.autoPenaltyApplied) {
+                        // Only apply auto-penalty to recent overdue tasks (within 72 hours), never retroactively on ancient backlog
+                        if (hoursLate >= 3 && hoursLate <= 72 && !task.autoPenaltyApplied) {
                             needsUpdate = true;
                             pointsToDeduct += 2;
                             const sub = (healedPrev.subjects || []).find(s => s.id === task.subjectId);
@@ -1367,7 +1378,8 @@ function App() {
 
 
                 if (db) {
-                    const userRef = db.collection("users").doc(user);
+                    const cleanUserKey = (user === 'שלי' || user === 'שליי') ? 'שליי' : user;
+                    const userRef = db.collection("users").doc(cleanUserKey);
                     userRef.get().then((doc) => {
                         if (doc.exists) {
                             const data = doc.data();
@@ -1376,8 +1388,16 @@ function App() {
                                 return;
                             }
                             setGlobalState(prev => {
-                                const merged = healCompletedFromHistory(applyRemoteUser(prev.users[user], data, null) || data);
-                                return {...prev, users: {...prev.users, [user]: merged}, activeUser: user};
+                                const merged = healCompletedFromHistory(applyRemoteUser(prev.users[cleanUserKey] || prev.users[user], data, null) || data);
+                                return {
+                                    ...prev, 
+                                    users: {
+                                        ...prev.users, 
+                                        [user]: merged,
+                                        [cleanUserKey]: merged
+                                    }, 
+                                    activeUser: cleanUserKey
+                                };
                             });
                             showToast(`איזה כיף שחזרת, ${data.name}! ✨`, 'success');
                         } else {
