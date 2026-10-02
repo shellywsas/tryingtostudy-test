@@ -252,12 +252,12 @@ const FileStorage = (() => {
             return [];
         }
         try {
-            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'js/pdf.worker.min.js?v=20261003_4';
 
             let pdfData;
             const base64Index = pdfDataUrl.indexOf(';base64,');
             if (base64Index !== -1) {
-                const base64 = pdfDataUrl.substring(base64Index + 8);
+                const base64 = pdfDataUrl.substring(base64Index + 8).replace(/\s/g, '');
                 const binaryString = atob(base64);
                 const len = binaryString.length;
                 const bytes = new Uint8Array(len);
@@ -265,14 +265,30 @@ const FileStorage = (() => {
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 pdfData = bytes;
+            } else if (pdfDataUrl.startsWith('data:')) {
+                const commaIndex = pdfDataUrl.indexOf(',');
+                const raw = decodeURIComponent(pdfDataUrl.substring(commaIndex + 1));
+                const bytes = new Uint8Array(raw.length);
+                for (let i = 0; i < raw.length; i++) {
+                    bytes[i] = raw.charCodeAt(i);
+                }
+                pdfData = bytes;
             } else {
                 pdfData = pdfDataUrl;
             }
 
-            const loadingTask = window.pdfjsLib.getDocument({ data: pdfData });
-            const pdf = await loadingTask.promise;
-            const pages = [];
+            let pdf;
+            try {
+                const loadingTask = window.pdfjsLib.getDocument({ data: pdfData });
+                pdf = await loadingTask.promise;
+            } catch (errWorker) {
+                console.warn('Worker attempt failed, retrying in main thread:', errWorker);
+                window.pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+                const fallbackTask = window.pdfjsLib.getDocument({ data: pdfData });
+                pdf = await fallbackTask.promise;
+            }
 
+            const pages = [];
             for (let num = 1; num <= pdf.numPages; num++) {
                 const page = await pdf.getPage(num);
                 // Scale 1.5 gives high resolution, suitable for crisp printouts

@@ -2357,7 +2357,7 @@ function App() {
                     }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
                     // 2. All homework tasks in this subject
-                    const homeworkTasks = allSubTasks.filter(t => !t.isLessonLog).sort((a, b) => {
+                    const homeworkTasks = allSubTasks.filter(t => !t.isLessonLog || (t.attachments && t.attachments.some(a => a.category === 'homework'))).sort((a, b) => {
                         const dateA = a.dueDate || a.givenDate || a.createdAt || '';
                         const dateB = b.dueDate || b.givenDate || b.createdAt || '';
                         return dateB.localeCompare(dateA);
@@ -2386,9 +2386,9 @@ function App() {
                                     dataUrl = await window.FileStorage.loadAttachmentData(att);
                                 }
                                 let pdfPages = [];
-                                const isPdf = att.type === 'application/pdf' || 
-                                              (att.name && att.name.toLowerCase().endsWith('.pdf')) || 
-                                              (dataUrl && dataUrl.startsWith('data:application/pdf'));
+                                const isPdf = (att.type && /pdf/i.test(att.type)) || 
+                                              (att.name && /\.pdf$/i.test(att.name.trim())) || 
+                                              (dataUrl && /data:application\/(x-)?pdf/i.test(dataUrl));
                                 
                                 if (isPdf && dataUrl && window.FileStorage && window.FileStorage.renderPdfToImages) {
                                     pdfPages = await window.FileStorage.renderPdfToImages(dataUrl);
@@ -2401,19 +2401,23 @@ function App() {
                         }));
                     };
 
-                    // Load board attachments with dataUrls and pdfPages if needed
+                    // Load board and homework attachments with dataUrls and pdfPages for lessons if needed
                     const enrichedLessons = await Promise.all(lessonTasks.map(async (task) => {
                         const boardAtts = (task.attachments || []).filter(a => a.category === 'board' || (!a.category && task.isLessonLog));
-                        if (!needLessonBoard || boardAtts.length === 0) {
-                            return { ...task, loadedBoardAttachments: [] };
-                        }
-                        const loaded = await enrichAttachmentList(boardAtts);
-                        return { ...task, loadedBoardAttachments: loaded };
+                        const hwAtts = (task.attachments || []).filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
+
+                        const loadedBoard = (needLessonBoard && boardAtts.length > 0) ? await enrichAttachmentList(boardAtts) : [];
+                        const loadedHw = (needHomeworkFiles && hwAtts.length > 0) ? await enrichAttachmentList(hwAtts) : [];
+
+                        return { ...task, loadedBoardAttachments: loadedBoard, loadedHwAttachments: loadedHw };
                     }));
 
                     // Load homework attachments with dataUrls and pdfPages if needed
                     const enrichedHomework = await Promise.all(homeworkTasks.map(async (task) => {
-                        const hwAtts = (task.attachments || []).filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
+                        let hwAtts = (task.attachments || []).filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
+                        if (hwAtts.length === 0 && task.attachments && task.attachments.length > 0 && !task.isLessonLog) {
+                            hwAtts = task.attachments.filter(a => a.category !== 'board');
+                        }
                         if (!needHomeworkFiles || hwAtts.length === 0) {
                             return { ...task, loadedHwAttachments: [] };
                         }
@@ -2454,13 +2458,15 @@ function App() {
 
                     const printModeConfig = {
                         mode,
-                        includeSummary: mode === 'all' || (mode === 'custom' && curCustom.summary),
-                        includeSyllabus: mode === 'all' || (mode === 'custom' && curCustom.syllabus),
-                        includeLessonBoard: needLessonBoard,
-                        includeHomeworkFiles: needHomeworkFiles,
-                        includeWeaknesses: mode === 'all' || (mode === 'custom' && curCustom.weaknesses),
-                        includeExams: mode === 'all' || (mode === 'custom' && curCustom.exams),
-                        includeChecklist: mode === 'all' || (mode === 'custom' && curCustom.checklist)
+                        needLessonBoard,
+                        needHomeworkFiles,
+                        includeSummary: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.summary),
+                        includeSyllabus: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.syllabus),
+                        includeLessonBoard: needLessonBoard || mode === 'text_only',
+                        includeHomeworkFiles: needHomeworkFiles || mode === 'text_only',
+                        includeWeaknesses: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.weaknesses),
+                        includeExams: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.exams),
+                        includeChecklist: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.checklist)
                     };
 
                     setExamPlanData({
@@ -2832,12 +2838,14 @@ function App() {
                                 <h1 className="text-2xl md:text-3xl font-black text-stone-900 mb-1">
                                     {printModeConfig?.mode === 'lessons' ? `📸 יומן שיעורים וצילומי לוח: ${subjectName}` :
                                      printModeConfig?.mode === 'homework' ? `📄 שיעורי בית ודפי עבודה: ${subjectName}` :
+                                     printModeConfig?.mode === 'text_only' ? `📝 חוברת סיכום והכנה לבחינה: ${subjectName}` :
                                      `חוברת הכנה מקיפה למבחן: ${subjectName}`}
                                 </h1>
                                 <p className="text-sm font-bold text-stone-600">
                                     תלמידה: {activeUserData.name} • {
                                         printModeConfig?.mode === 'lessons' ? 'ריכוז שיעורים וצילומי לוח מהכיתה' :
                                         printModeConfig?.mode === 'homework' ? 'ריכוז שיעורי בית, דפי עבודה ותרגילים' :
+                                        printModeConfig?.mode === 'text_only' ? 'חוברת סיכום טקסטואלית מרוכזת (ללא קבצים)' :
                                         'תיק למידה מרוכז לקראת הבחינה'
                                     }
                                 </p>
@@ -2998,7 +3006,64 @@ function App() {
                                                                 })}
                                                             </div>
                                                         ) : (
-                                                            <div className="text-[11px] text-stone-400 italic">לא צורף צילום לוח לשיעור זה</div>
+                                                            printModeConfig?.needLessonBoard ? (
+                                                                <div className="text-[11px] text-stone-400 italic">לא צורף צילום לוח לשיעור זה</div>
+                                                            ) : null
+                                                        )}
+                                                        {task.loadedHwAttachments && task.loadedHwAttachments.length > 0 && printModeConfig?.needHomeworkFiles && (
+                                                            <div className="mt-3 space-y-3 pt-3 border-t border-stone-200">
+                                                                <div className="text-xs font-bold text-indigo-900 flex items-center gap-1.5">
+                                                                    <span>📄</span> דפי עבודה ושיעורי בית מהשיעור ({task.loadedHwAttachments.length}):
+                                                                </div>
+                                                                {task.loadedHwAttachments.map((f, fIdx) => {
+                                                                    if (f.pdfPages && f.pdfPages.length > 0) {
+                                                                        return (
+                                                                            <div key={f.id || fIdx} className="space-y-4 my-2">
+                                                                                {f.pdfPages.map(page => (
+                                                                                    <div key={page.pageNumber} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid shadow-xs">
+                                                                                        <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                            <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
+                                                                                                <span>📄</span> {f.name}
+                                                                                            </span>
+                                                                                            <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                                עמוד {page.pageNumber} מתוך {page.totalPages}
+                                                                                            </span>
+                                                                                        </div>
+                                                                                        <img 
+                                                                                            src={page.dataUrl} 
+                                                                                            alt={`${f.name} - עמוד ${page.pageNumber}`} 
+                                                                                            className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
+                                                                                        />
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    const isImg = f.dataUrl && (f.dataUrl.startsWith('data:image/') || f.type?.startsWith('image/'));
+                                                                    if (isImg) {
+                                                                        return (
+                                                                            <div key={f.id || fIdx} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid my-2 shadow-xs">
+                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                    <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
+                                                                                        <span>📄</span> {f.name || 'דף עבודה / תרגילים'}
+                                                                                    </span>
+                                                                                    <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                        תמונת דף עבודה
+                                                                                    </span>
+                                                                                </div>
+                                                                                <img 
+                                                                                    src={f.dataUrl} 
+                                                                                    alt={f.name || 'דף עבודה'} 
+                                                                                    className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
+                                                                                />
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    return null;
+                                                                })}
+                                                            </div>
                                                         )}
                                                     </div>
                                                 );
@@ -8151,7 +8216,33 @@ function App() {
                                         </div>
                                     </div>
 
-                                    {/* Option 2: Lessons & Board Photos Only */}
+                                    {/* Option 2: Text Only (Fast, No Files/Images) */}
+                                    <div 
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'text_only' }))}
+                                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
+                                            examPrintModal.mode === 'text_only' 
+                                                ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
+                                                : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
+                                        }`}
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
+                                                examPrintModal.mode === 'text_only' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
+                                            }`}>
+                                                {examPrintModal.mode === 'text_only' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                                            </div>
+                                            <div>
+                                                <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
+                                                    <span>📝 חוברת טקסטואלית בלבד (ללא קבצים ותמונות)</span>
+                                                </div>
+                                                <p className="text-xs text-stone-500 mt-1">
+                                                    סילבוס, תרגילים קשים, יומן כותרות שיעורים, רשימת ש.ב ומבחנים — קובץ קל ומהיר ללא תמונות או PDF.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Option 3: Lessons & Board Photos Only */}
                                     <div 
                                         onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'lessons' }))}
                                         className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
