@@ -1106,6 +1106,8 @@ function App() {
             const [taskFormAttachments, setTaskFormAttachments] = useState([]);
             const [editTaskAttachments, setEditTaskAttachments] = useState([]);
             const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+            const [examPrintModal, setExamPrintModal] = useState(null);
+            const [isPreparingPrint, setIsPreparingPrint] = useState(false);
 
             useEffect(() => {
                 if (editingTask) {
@@ -1115,7 +1117,7 @@ function App() {
                 }
             }, [editingTask]);
 
-            const handleFilesSelected = async (e, target = 'new') => {
+            const handleFilesSelected = async (e, target = 'new', category = 'general') => {
                 const files = Array.from(e.target.files || []);
                 if (files.length === 0) return;
                 setIsUploadingAttachment(true);
@@ -1123,7 +1125,7 @@ function App() {
                     const processedList = [];
                     for (const f of files) {
                         showToast(`מעבד: ${f.name}... ⏳`, 'info');
-                        const saved = await window.FileStorage.processAndSaveFile(f);
+                        const saved = await window.FileStorage.processAndSaveFile(f, category);
                         if (saved) processedList.push(saved);
                     }
                     if (target === 'new') {
@@ -1131,7 +1133,8 @@ function App() {
                     } else if (target === 'edit') {
                         setEditTaskAttachments(prev => [...prev, ...processedList]);
                     }
-                    showToast(`התווספו ${processedList.length} קבצים בהצלחה! 📎`, 'success');
+                    const label = category === 'board' ? 'צילומי לוח' : (category === 'homework' ? 'דפי עבודה' : 'קבצים');
+                    showToast(`התווספו ${processedList.length} ${label} בהצלחה! 📎`, 'success');
                 } catch (err) {
                     console.error('File process error:', err);
                     showToast('שגיאה בעיבוד הקובץ: ' + (err.message || err), 'error');
@@ -1141,19 +1144,20 @@ function App() {
                 }
             };
 
-            const handleQuickAddAttachmentToTask = async (task, file) => {
+            const handleQuickAddAttachmentToTask = async (task, file, category = 'general') => {
                 if (!task || !file) return;
                 setIsUploadingAttachment(true);
                 try {
                     showToast(`מעבד קובץ למשימה... ⏳`, 'info');
-                    const saved = await window.FileStorage.processAndSaveFile(file);
+                    const saved = await window.FileStorage.processAndSaveFile(file, category);
                     if (saved) {
                         const updatedAttachments = [...(task.attachments || []), saved];
                         updateUserData(prev => ({
                             ...prev,
                             tasks: prev.tasks.map(t => t.id === task.id ? { ...t, attachments: updatedAttachments } : t)
                         }));
-                        showToast(`הקובץ ${saved.name} צורף למשימה בהצלחה! 📎`, 'success');
+                        const label = category === 'board' ? 'צילום הלוח' : (category === 'homework' ? 'דף העבודה' : 'הקובץ');
+                        showToast(`${label} צורף בהצלחה! 📎`, 'success');
                     }
                 } catch (err) {
                     console.error('Quick attachment error:', err);
@@ -1163,9 +1167,19 @@ function App() {
                 }
             };
 
-            const openAttachmentViewer = async (task, initialIndex = 0) => {
-                const attachments = task.attachments || [];
+            const openAttachmentViewer = async (task, initialIndex = 0, filterCategory = null) => {
+                let attachments = task.attachments || [];
                 if (attachments.length === 0) return;
+                if (filterCategory) {
+                    const filtered = attachments.filter(a => {
+                        if (filterCategory === 'board') return a.category === 'board' || (!a.category && task.isLessonLog);
+                        if (filterCategory === 'homework') return a.category === 'homework' || (!a.category && !task.isLessonLog);
+                        return true;
+                    });
+                    if (filtered.length > 0) {
+                        attachments = filtered;
+                    }
+                }
                 const activeIndex = Math.min(initialIndex, attachments.length - 1);
                 setViewingAttachment({
                     task,
@@ -2260,127 +2274,224 @@ function App() {
                     showToast('יש לבחור מקצוע מהרשימה', 'warning');
                     return;
                 }
-                const subObj = (activeUserData.subjects || []).find(s => s.id === subjectId || s.name === subjectId);
-                const subjectIdTarget = subObj ? subObj.id : subjectId;
-                const subjectName = subObj ? `${subObj.emoji || ''} ${subObj.name}` : (subjectId || 'כללי');
-                const cleanSubName = subObj ? subObj.name.trim().toLowerCase() : (typeof subjectId === 'string' ? subjectId.trim().toLowerCase() : '');
-
-                const isMatchingTask = (t) => {
-                    if (!t) return false;
-                    if (t.subjectId === subjectIdTarget || t.subjectId === subjectId) return true;
-                    if (subObj) {
-                        if (t.subjectId === subObj.name) return true;
-                        if (t.subjectName && t.subjectName.trim().toLowerCase() === cleanSubName) return true;
-                        if (t.subjectId && typeof t.subjectId === 'string' && subObj.id && t.subjectId.toLowerCase() === subObj.id.toLowerCase()) return true;
-                    }
-                    if (cleanSubName && t.subjectId && typeof t.subjectId === 'string' && t.subjectId.trim().toLowerCase() === cleanSubName) return true;
-                    return false;
-                };
-
-                // All tasks and lesson logs belonging to this subject (both completed and pending)
-                const allSubTasks = (activeUserData.tasks || []).filter(isMatchingTask);
-
-                // 1. All unique lesson topics and titles
-                const topicsMap = new Map();
-                allSubTasks.forEach(t => {
-                    let topic = (t.lessonTopic && t.lessonTopic.trim()) || '';
-                    if (!topic && t.isLessonLog && t.title) {
-                        topic = t.title.replace(/^סיכום שיעור:\s*/, '').trim();
-                    }
-                    if (!topic && t.title) {
-                        topic = t.title.trim();
-                    }
-                    if (topic) {
-                        const existing = topicsMap.get(topic) || { count: 0, date: '', hasHw: false, understanding: [] };
-                        existing.count++;
-                        const d = t.givenDate || (t.createdAt ? t.createdAt.split('T')[0] : '') || (t.completedAt ? t.completedAt.split('T')[0] : '');
-                        if (!existing.date || (d && d > existing.date)) {
-                            existing.date = d;
-                        }
-                        if (!t.isLessonLog) {
-                            existing.hasHw = true;
-                        }
-                        if (t.understandingRating) {
-                            existing.understanding.push(Number(t.understandingRating));
-                        }
-                        topicsMap.set(topic, existing);
+                setExamPrintModal({
+                    subjectId,
+                    mode: 'all',
+                    customSections: {
+                        summary: true,
+                        syllabus: true,
+                        lessonsWithBoard: true,
+                        homeworkWithFiles: true,
+                        weaknesses: true,
+                        exams: true,
+                        checklist: true
                     }
                 });
+            };
 
-                const allTopicsList = Array.from(topicsMap.entries()).map(([topic, info]) => {
-                    const avgRating = info.understanding.length > 0 
-                        ? (info.understanding.reduce((a, b) => a + b, 0) / info.understanding.length).toFixed(1)
-                        : null;
-                    return {
-                        topic,
-                        date: info.date,
-                        count: info.count,
-                        hasHw: info.hasHw,
-                        avgRating
+            const prepareAndPrintExam = async (subjectId, mode = 'all', customSections = null) => {
+                if (!subjectId) {
+                    showToast('יש לבחור מקצוע מהרשימה', 'warning');
+                    return;
+                }
+                setIsPreparingPrint(true);
+                try {
+                    const subObj = (activeUserData.subjects || []).find(s => s.id === subjectId || s.name === subjectId);
+                    const subjectIdTarget = subObj ? subObj.id : subjectId;
+                    const subjectName = subObj ? `${subObj.emoji || ''} ${subObj.name}` : (subjectId || 'כללי');
+                    const cleanSubName = subObj ? subObj.name.trim().toLowerCase() : (typeof subjectId === 'string' ? subjectId.trim().toLowerCase() : '');
+
+                    const isMatchingTask = (t) => {
+                        if (!t) return false;
+                        if (t.subjectId === subjectIdTarget || t.subjectId === subjectId) return true;
+                        if (subObj) {
+                            if (t.subjectId === subObj.name) return true;
+                            if (t.subjectName && t.subjectName.trim().toLowerCase() === cleanSubName) return true;
+                            if (t.subjectId && typeof t.subjectId === 'string' && subObj.id && t.subjectId.toLowerCase() === subObj.id.toLowerCase()) return true;
+                        }
+                        if (cleanSubName && t.subjectId && typeof t.subjectId === 'string' && t.subjectId.trim().toLowerCase() === cleanSubName) return true;
+                        return false;
                     };
-                }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
-                // 2. All homework tasks in this subject
-                const homeworkTasks = allSubTasks.filter(t => !t.isLessonLog).sort((a, b) => {
-                    const dateA = a.dueDate || a.givenDate || a.createdAt || '';
-                    const dateB = b.dueDate || b.givenDate || b.createdAt || '';
-                    return dateB.localeCompare(dateA);
-                });
+                    // All tasks and lesson logs belonging to this subject
+                    const allSubTasks = (activeUserData.tasks || []).filter(isMatchingTask);
 
-                // 3. Weaknesses and difficulties (understanding <= 3)
-                const weakTasks = homeworkTasks.filter(t => t.completed && t.understandingRating && Number(t.understandingRating) <= 3);
+                    // 1. All unique lesson topics and titles
+                    const topicsMap = new Map();
+                    allSubTasks.forEach(t => {
+                        let topic = (t.lessonTopic && t.lessonTopic.trim()) || '';
+                        if (!topic && t.isLessonLog && t.title) {
+                            topic = t.title.replace(/^סיכום שיעור:\s*/, '').trim();
+                        }
+                        if (!topic && t.title) {
+                            topic = t.title.trim();
+                        }
+                        if (topic) {
+                            const existing = topicsMap.get(topic) || { count: 0, date: '', hasHw: false, understanding: [] };
+                            existing.count++;
+                            const d = t.givenDate || (t.createdAt ? t.createdAt.split('T')[0] : '') || (t.completedAt ? t.completedAt.split('T')[0] : '');
+                            if (!existing.date || (d && d > existing.date)) {
+                                existing.date = d;
+                            }
+                            if (!t.isLessonLog) {
+                                existing.hasHw = true;
+                            }
+                            if (t.understandingRating) {
+                                existing.understanding.push(Number(t.understandingRating));
+                            }
+                            topicsMap.set(topic, existing);
+                        }
+                    });
 
-                // 4. Hard exercises recorded
-                const hardEx = allSubTasks.filter(t => t.hardExercises && t.hardExercises.trim() !== '').map(t => ({
-                    title: t.title,
-                    ex: t.hardExercises,
-                    date: t.completedAt || t.dueDate || t.createdAt,
-                    topic: t.lessonTopic || t.title
-                }));
+                    const allTopicsList = Array.from(topicsMap.entries()).map(([topic, info]) => {
+                        const avgRating = info.understanding.length > 0 
+                            ? (info.understanding.reduce((a, b) => a + b, 0) / info.understanding.length).toFixed(1)
+                            : null;
+                        return {
+                            topic,
+                            date: info.date,
+                            count: info.count,
+                            hasHw: info.hasHw,
+                            avgRating
+                        };
+                    }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
-                // 5. Given up tasks
-                const givenUpTasks = allSubTasks.filter(t => t.givenUp);
+                    // 2. All homework tasks in this subject
+                    const homeworkTasks = allSubTasks.filter(t => !t.isLessonLog).sort((a, b) => {
+                        const dateA = a.dueDate || a.givenDate || a.createdAt || '';
+                        const dateB = b.dueDate || b.givenDate || b.createdAt || '';
+                        return dateB.localeCompare(dateA);
+                    });
 
-                // 6. Previous exams in this subject
-                const subjectExams = (activeUserData.exams || []).filter(e => 
-                    e.subjectId === subjectIdTarget || e.subjectId === subjectId || (subObj && (e.subjectName === subObj.name || (e.examName && cleanSubName && e.examName.toLowerCase().includes(cleanSubName))))
-                ).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+                    // 3. All lesson log tasks in this subject
+                    const lessonTasks = allSubTasks.filter(t => t.isLessonLog || (t.lessonTopic && t.lessonTopic.trim() !== '')).sort((a, b) => {
+                        const dateA = a.givenDate || a.createdAt || '';
+                        const dateB = b.givenDate || b.createdAt || '';
+                        return dateB.localeCompare(dateA);
+                    });
 
-                const gradedExams = subjectExams.filter(e => e.grade && !isNaN(Number(e.grade)));
-                const examAvg = gradedExams.length > 0 
-                    ? (gradedExams.reduce((sum, e) => sum + Number(e.grade), 0) / gradedExams.length).toFixed(1)
-                    : null;
+                    // Determine what attachments need to be loaded
+                    const defaultCustom = { summary: true, syllabus: true, lessonsWithBoard: true, homeworkWithFiles: true, weaknesses: true, exams: true, checklist: true };
+                    const curCustom = customSections || defaultCustom;
 
-                // Overall metrics
-                const completedHwCount = homeworkTasks.filter(t => t.completed && !t.givenUp).length;
-                const ratedTasks = homeworkTasks.filter(t => t.completed && t.understandingRating);
-                const avgUnderstanding = ratedTasks.length > 0 
-                    ? (ratedTasks.reduce((sum, t) => sum + Number(t.understandingRating), 0) / ratedTasks.length).toFixed(1)
-                    : null;
+                    const needLessonBoard = mode === 'all' || mode === 'lessons' || (mode === 'custom' && curCustom.lessonsWithBoard);
+                    const needHomeworkFiles = mode === 'all' || mode === 'homework' || (mode === 'custom' && curCustom.homeworkWithFiles);
 
-                setExamPlanData({
-                    subjectId: subjectIdTarget,
-                    subjectName,
-                    subObj,
-                    allTopicsList,
-                    homeworkTasks,
-                    weakTasks,
-                    hardEx,
-                    givenUpTasks,
-                    subjectExams,
-                    examAvg,
-                    avgUnderstanding,
-                    completedHwCount,
-                    date: new Date().toLocaleDateString('he-IL')
-                });
+                    // Load board attachments with dataUrls if needed
+                    const enrichedLessons = await Promise.all(lessonTasks.map(async (task) => {
+                        const boardAtts = (task.attachments || []).filter(a => a.category === 'board' || (!a.category && task.isLessonLog));
+                        if (!needLessonBoard || boardAtts.length === 0) {
+                            return { ...task, loadedBoardAttachments: [] };
+                        }
+                        const loaded = await Promise.all(boardAtts.map(async (att) => {
+                            try {
+                                if (window.FileStorage && window.FileStorage.loadAttachmentData) {
+                                    const dataUrl = await window.FileStorage.loadAttachmentData(att);
+                                    return { ...att, dataUrl };
+                                }
+                            } catch (e) {
+                                console.warn('Could not load board attachment for print', e);
+                            }
+                            return att;
+                        }));
+                        return { ...task, loadedBoardAttachments: loaded };
+                    }));
 
-                setPrintType('exam');
-                setPrintMode(true);
-                setTimeout(() => {
-                    window.print();
-                    setPrintMode(false);
-                    setPrintType(null);
-                }, 500);
+                    // Load homework attachments with dataUrls if needed
+                    const enrichedHomework = await Promise.all(homeworkTasks.map(async (task) => {
+                        const hwAtts = (task.attachments || []).filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
+                        if (!needHomeworkFiles || hwAtts.length === 0) {
+                            return { ...task, loadedHwAttachments: [] };
+                        }
+                        const loaded = await Promise.all(hwAtts.map(async (att) => {
+                            try {
+                                if (window.FileStorage && window.FileStorage.loadAttachmentData) {
+                                    const dataUrl = await window.FileStorage.loadAttachmentData(att);
+                                    return { ...att, dataUrl };
+                                }
+                            } catch (e) {
+                                console.warn('Could not load hw attachment for print', e);
+                            }
+                            return att;
+                        }));
+                        return { ...task, loadedHwAttachments: loaded };
+                    }));
+
+                    // 4. Weaknesses and difficulties (understanding <= 3)
+                    const weakTasks = homeworkTasks.filter(t => t.completed && t.understandingRating && Number(t.understandingRating) <= 3);
+
+                    // 5. Hard exercises recorded
+                    const hardEx = allSubTasks.filter(t => t.hardExercises && t.hardExercises.trim() !== '').map(t => ({
+                        title: t.title,
+                        ex: t.hardExercises,
+                        date: t.completedAt || t.dueDate || t.createdAt,
+                        topic: t.lessonTopic || t.title
+                    }));
+
+                    // 6. Given up tasks
+                    const givenUpTasks = allSubTasks.filter(t => t.givenUp);
+
+                    // 7. Previous exams in this subject
+                    const subjectExams = (activeUserData.exams || []).filter(e => 
+                        e.subjectId === subjectIdTarget || e.subjectId === subjectId || (subObj && (e.subjectName === subObj.name || (e.examName && cleanSubName && e.examName.toLowerCase().includes(cleanSubName))))
+                    ).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+                    const gradedExams = subjectExams.filter(e => e.grade && !isNaN(Number(e.grade)));
+                    const examAvg = gradedExams.length > 0 
+                        ? (gradedExams.reduce((sum, e) => sum + Number(e.grade), 0) / gradedExams.length).toFixed(1)
+                        : null;
+
+                    // Overall metrics
+                    const completedHwCount = homeworkTasks.filter(t => t.completed && !t.givenUp).length;
+                    const ratedTasks = homeworkTasks.filter(t => t.completed && t.understandingRating);
+                    const avgUnderstanding = ratedTasks.length > 0 
+                        ? (ratedTasks.reduce((sum, t) => sum + Number(t.understandingRating), 0) / ratedTasks.length).toFixed(1)
+                        : null;
+
+                    const printModeConfig = {
+                        mode,
+                        includeSummary: mode === 'all' || (mode === 'custom' && curCustom.summary),
+                        includeSyllabus: mode === 'all' || (mode === 'custom' && curCustom.syllabus),
+                        includeLessonBoard: needLessonBoard,
+                        includeHomeworkFiles: needHomeworkFiles,
+                        includeWeaknesses: mode === 'all' || (mode === 'custom' && curCustom.weaknesses),
+                        includeExams: mode === 'all' || (mode === 'custom' && curCustom.exams),
+                        includeChecklist: mode === 'all' || (mode === 'custom' && curCustom.checklist)
+                    };
+
+                    setExamPlanData({
+                        subjectId: subjectIdTarget,
+                        subjectName,
+                        subObj,
+                        allTopicsList,
+                        homeworkTasks,
+                        lessonTasks: enrichedLessons,
+                        homeworkTasksEnriched: enrichedHomework,
+                        weakTasks,
+                        hardEx,
+                        givenUpTasks,
+                        subjectExams,
+                        examAvg,
+                        avgUnderstanding,
+                        completedHwCount,
+                        printModeConfig,
+                        date: new Date().toLocaleDateString('he-IL')
+                    });
+
+                    setExamPrintModal(null);
+                    setPrintType('exam');
+                    setPrintMode(true);
+                    setTimeout(() => {
+                        window.print();
+                        setPrintMode(false);
+                        setPrintType(null);
+                    }, 650);
+                } catch (err) {
+                    console.error('Error preparing print:', err);
+                    showToast('אירעה שגיאה בהכנת מסמך ההדפסה', 'error');
+                } finally {
+                    setIsPreparingPrint(false);
+                }
             };
 
 
@@ -2673,6 +2784,8 @@ function App() {
                         subjectName,
                         allTopicsList = [],
                         homeworkTasks = [],
+                        lessonTasks = [],
+                        homeworkTasksEnriched = [],
                         weakTasks = [],
                         hardEx = [],
                         givenUpTasks = [],
@@ -2680,6 +2793,7 @@ function App() {
                         examAvg,
                         avgUnderstanding,
                         completedHwCount = 0,
+                        printModeConfig = {},
                         date
                     } = examPlanData;
 
@@ -2688,213 +2802,321 @@ function App() {
                             {/* Header */}
                             <div className="text-center mb-6 border-b-2 border-stone-800 pb-4">
                                 <div className="flex items-center justify-between text-xs text-stone-500 font-bold mb-2">
-                                    <span className="bg-purple-50 text-purple-900 px-2.5 py-1 rounded-lg border border-purple-200">StudyStreak Pro • כיתה י"ב</span>
+                                    <span className="bg-purple-50 text-purple-900 px-2.5 py-1 rounded-lg border border-purple-200">StudyStreak Pro • שנת לימודים תשפ"ו</span>
                                     <span>תאריך הפקה: {date}</span>
                                 </div>
-                                <h1 className="text-3xl font-black text-stone-900 mb-1">חוברת הכנה מקיפה למבחן: {subjectName}</h1>
-                                <p className="text-base font-bold text-stone-600">
-                                    תלמידה: {activeUserData.name} • תיק למידה מרוכז לקראת הבחינה
+                                <h1 className="text-2xl md:text-3xl font-black text-stone-900 mb-1">
+                                    {printModeConfig?.mode === 'lessons' ? `📸 יומן שיעורים וצילומי לוח: ${subjectName}` :
+                                     printModeConfig?.mode === 'homework' ? `📄 שיעורי בית ודפי עבודה: ${subjectName}` :
+                                     `חוברת הכנה מקיפה למבחן: ${subjectName}`}
+                                </h1>
+                                <p className="text-sm font-bold text-stone-600">
+                                    תלמידה: {activeUserData.name} • {
+                                        printModeConfig?.mode === 'lessons' ? 'ריכוז שיעורים וצילומי לוח מהכיתה' :
+                                        printModeConfig?.mode === 'homework' ? 'ריכוז שיעורי בית, דפי עבודה ותרגילים' :
+                                        'תיק למידה מרוכז לקראת הבחינה'
+                                    }
                                 </p>
                             </div>
 
                             {/* Summary KPI Cards */}
-                            <div className="grid grid-cols-4 gap-3 mb-6">
-                                <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
-                                    <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">נושאים שנלמדו</div>
-                                    <div className="text-2xl font-black text-stone-800">{allTopicsList.length} 📖</div>
-                                </div>
-                                <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
-                                    <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">שיעורי בית ומשימות</div>
-                                    <div className="text-2xl font-black text-purple-700">{completedHwCount} / {homeworkTasks.length} ✅</div>
-                                </div>
-                                <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
-                                    <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">מדד הבנה ממוצע</div>
-                                    <div className="text-2xl font-black text-amber-600">{avgUnderstanding ? `${avgUnderstanding} / 5 ⭐️` : '-'}</div>
-                                </div>
-                                <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
-                                    <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">ממוצע מבחנים קודמים</div>
-                                    <div className="text-2xl font-black text-indigo-600">{examAvg ? `${examAvg} 🎓` : '-'}</div>
-                                </div>
-                            </div>
-
-                            {/* Section 1: Lesson Topics */}
-                            <div className="mb-6">
-                                <h2 className="text-base font-bold bg-purple-50 text-purple-900 p-2.5 mb-3 rounded-lg border border-purple-200 flex items-center justify-between">
-                                    <span>📚 סילבוס ונושאי הלימוד שנלמדו השנה ({allTopicsList.length})</span>
-                                    <span className="text-xs font-normal text-purple-700">סמני V בתיבה לצד כל נושא שחזרת עליו</span>
-                                </h2>
-                                {allTopicsList.length > 0 ? (
-                                    <div className="grid grid-cols-2 gap-2 text-xs">
-                                        {allTopicsList.map((item, idx) => (
-                                            <div key={idx} className="flex items-center justify-between p-2.5 rounded-lg border border-stone-200 bg-stone-50/60">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="inline-block w-4 h-4 border-2 border-stone-400 rounded bg-white shrink-0"></span>
-                                                    <span className="font-bold text-stone-800">{item.topic}</span>
-                                                </div>
-                                                <div className="flex items-center gap-2 text-[11px] text-stone-500">
-                                                    {item.date && <span>{new Date(item.date).toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})}</span>}
-                                                    {item.avgRating && <span className="text-amber-800 font-bold bg-amber-100/80 px-1.5 py-0.5 rounded">{item.avgRating}★</span>}
-                                                </div>
-                                            </div>
-                                        ))}
+                            {printModeConfig?.includeSummary && (
+                                <div className="grid grid-cols-4 gap-3 mb-6 break-inside-avoid">
+                                    <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
+                                        <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">נושאים שנלמדו</div>
+                                        <div className="text-2xl font-black text-stone-800">{allTopicsList.length} 📖</div>
                                     </div>
-                                ) : (
-                                    <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
-                                        לא תועדו נושאי שיעור עדיין.
+                                    <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
+                                        <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">שיעורי בית ומשימות</div>
+                                        <div className="text-2xl font-black text-purple-700">{completedHwCount} / {homeworkTasks.length} ✅</div>
                                     </div>
-                                )}
-                            </div>
+                                    <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
+                                        <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">מדד הבנה ממוצע</div>
+                                        <div className="text-2xl font-black text-amber-600">{avgUnderstanding ? `${avgUnderstanding} / 5 ⭐️` : '-'}</div>
+                                    </div>
+                                    <div className="bg-stone-50 p-3.5 rounded-xl text-center border border-stone-200">
+                                        <div className="text-[11px] text-stone-500 font-bold mb-0.5 uppercase">ממוצע מבחנים קודמים</div>
+                                        <div className="text-2xl font-black text-indigo-600">{examAvg ? `${examAvg} 🎓` : '-'}</div>
+                                    </div>
+                                </div>
+                            )}
 
-                            {/* Section 2: Homework List */}
-                            <div className="mb-6">
-                                <h2 className="text-base font-bold bg-stone-100 text-stone-900 p-2.5 mb-3 rounded-lg border border-stone-200 flex items-center justify-between">
-                                    <span>📝 ריכוז שיעורי הבית והמשימות במקצוע ({homeworkTasks.length})</span>
-                                    <span className="text-xs font-normal text-stone-500">מעקב מלא אחרי כל המטלות</span>
-                                </h2>
-                                {homeworkTasks.length > 0 ? (
-                                    <table className="w-full text-right border-collapse text-xs">
-                                        <thead>
-                                            <tr className="border-b-2 border-stone-300 text-stone-600">
-                                                <th className="py-1.5 px-2">משימה</th>
-                                                <th className="py-1.5 px-2">נושא</th>
-                                                <th className="py-1.5 px-2">מועד הגשה</th>
-                                                <th className="py-1.5 px-2 text-center">סטטוס</th>
-                                                <th className="py-1.5 px-2 text-center">הבנה</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-stone-200">
-                                            {homeworkTasks.map((t, i) => (
-                                                <tr key={t.id || i} className={t.givenUp ? 'bg-stone-50 text-stone-400' : ''}>
-                                                    <td className="py-2 px-2 font-bold text-stone-800">{t.title}</td>
-                                                    <td className="py-2 px-2 text-stone-600">{t.lessonTopic || '-'}</td>
-                                                    <td className="py-2 px-2 text-stone-500" dir="rtl">
-                                                        {t.dueDate ? new Date(t.dueDate).toLocaleDateString('he-IL') : (t.givenDate ? new Date(t.givenDate).toLocaleDateString('he-IL') : '-')}
-                                                    </td>
-                                                    <td className="py-2 px-2 text-center font-bold">
-                                                        {t.completed ? (
-                                                            <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">הוגש ✅</span>
-                                                        ) : t.givenUp ? (
-                                                            <span className="text-stone-500 bg-stone-100 px-2 py-0.5 rounded">ויתרתי 🏳️</span>
-                                                        ) : (
-                                                            <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">פתוח ⏳</span>
-                                                        )}
-                                                    </td>
-                                                    <td className="py-2 px-2 text-center font-black">
-                                                        {t.understandingRating ? (
-                                                            <span className={t.understandingRating <= 2 ? 'text-rose-600 font-black' : t.understandingRating === 3 ? 'text-amber-600' : 'text-emerald-600'}>
-                                                                {t.understandingRating} / 5
+                            {/* Section 1: Syllabus / Lesson Topics */}
+                            {printModeConfig?.includeSyllabus && (
+                                <div className="mb-6 break-inside-avoid">
+                                    <h2 className="text-base font-bold bg-purple-50 text-purple-900 p-2.5 mb-3 rounded-lg border border-purple-200 flex items-center justify-between">
+                                        <span>📚 סילבוס ונושאי הלימוד שנלמדו ({allTopicsList.length})</span>
+                                        <span className="text-xs font-normal text-purple-700">סמני V בתיבה לצד כל נושא שחזרת עליו</span>
+                                    </h2>
+                                    {allTopicsList.length > 0 ? (
+                                        <div className="grid grid-cols-2 gap-2 text-xs">
+                                            {allTopicsList.map((item, idx) => (
+                                                <div key={idx} className="flex items-center justify-between p-2.5 rounded-lg border border-stone-200 bg-stone-50/60 break-inside-avoid">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="inline-block w-4 h-4 border-2 border-stone-400 rounded bg-white shrink-0"></span>
+                                                        <span className="font-bold text-stone-800">{item.topic}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 text-[11px] text-stone-500">
+                                                        {item.date && <span>{new Date(item.date).toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})}</span>}
+                                                        {item.avgRating && <span className="text-amber-800 font-bold bg-amber-100/80 px-1.5 py-0.5 rounded">{item.avgRating}★</span>}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
+                                            לא תועדו נושאי שיעור עדיין.
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Section 2: Lesson Log & Whiteboard Photos */}
+                            {printModeConfig?.includeLessonBoard && (
+                                <div className="mb-6">
+                                    <h2 className="text-base font-bold bg-purple-50 text-purple-900 p-2.5 mb-3 rounded-lg border border-purple-200 flex items-center justify-between">
+                                        <span>📸 יומן שיעורים וצילומי לוח מהכיתה ({lessonTasks.length})</span>
+                                        <span className="text-xs font-normal text-purple-700">כותרות שיעורים וצילומי הלוח</span>
+                                    </h2>
+                                    {lessonTasks.length > 0 ? (
+                                        <div className="space-y-4">
+                                            {lessonTasks.map((task, idx) => {
+                                                const photos = task.loadedBoardAttachments || [];
+                                                return (
+                                                    <div key={task.id || idx} className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 break-inside-avoid">
+                                                        <div className="flex items-center justify-between mb-2">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="font-bold text-stone-800 text-sm">{task.lessonTopic || task.title}</span>
+                                                                {task.title && task.title !== task.lessonTopic && (
+                                                                    <span className="text-xs text-stone-500">({task.title})</span>
+                                                                )}
+                                                            </div>
+                                                            <span className="text-xs text-stone-500 font-medium" dir="rtl">
+                                                                {task.givenDate ? new Date(task.givenDate).toLocaleDateString('he-IL') : (task.createdAt ? new Date(task.createdAt).toLocaleDateString('he-IL') : '-')}
                                                             </span>
-                                                        ) : (
-                                                            <span className="text-stone-400 font-normal">טרם דורג</span>
+                                                        </div>
+                                                        {task.notes && (
+                                                            <p className="text-xs text-stone-700 mb-2 bg-white p-2 rounded border border-stone-100 whitespace-pre-wrap">{task.notes}</p>
                                                         )}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                ) : (
-                                    <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
-                                        לא תועדו משימות שיעורי בית למקצוע זה.
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Section 3: Weaknesses & Difficulties */}
-                            <div className="mb-6">
-                                <h2 className="text-base font-bold bg-rose-50 text-rose-900 p-2.5 mb-3 rounded-lg border border-rose-200">
-                                    🎯 מוקדי קושי, נושאים לחיזוק ותרגילים מאתגרים
-                                </h2>
-                                
-                                <div className="mb-3">
-                                    <div className="text-xs font-bold text-stone-700 mb-1.5">⚡ נושאים שסומנו בהבנה נמוכה (דורשים חזרה ממוקדת):</div>
-                                    {weakTasks.length > 0 ? (
-                                        <div className="space-y-1.5">
-                                            {weakTasks.map(t => (
-                                                <div key={t.id} className="p-2 bg-rose-50/70 rounded-lg border border-rose-100 text-xs flex items-center justify-between">
-                                                    <span className="font-bold text-rose-800">{t.lessonTopic || t.title}</span>
-                                                    <span className="text-rose-600 font-bold bg-white px-2 py-0.5 rounded border border-rose-200">הבנה: {t.understandingRating}/5</span>
-                                                </div>
-                                            ))}
+                                                        {photos.length > 0 ? (
+                                                            <div className="mt-2">
+                                                                <div className="text-[11px] font-bold text-purple-800 mb-1.5">צילומי לוח מהשיעור ({photos.length}):</div>
+                                                                <div className={`grid ${photos.length === 1 ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
+                                                                    {photos.map((p, pIdx) => {
+                                                                        const isImg = p.dataUrl && (p.dataUrl.startsWith('data:image/') || p.type?.startsWith('image/'));
+                                                                        return (
+                                                                            <div key={p.id || pIdx} className="border border-stone-300 rounded-lg p-2 bg-white text-center break-inside-avoid">
+                                                                                {isImg ? (
+                                                                                    <img 
+                                                                                        src={p.dataUrl} 
+                                                                                        alt={p.name || 'צילום לוח'} 
+                                                                                        className="max-h-72 w-auto max-w-full mx-auto object-contain rounded" 
+                                                                                    />
+                                                                                ) : (
+                                                                                    <div className="p-3 text-xs text-stone-700 bg-stone-50 rounded font-medium">
+                                                                                        📄 מסמך מצורף: {p.name}
+                                                                                    </div>
+                                                                                )}
+                                                                                {p.name && <div className="text-[10px] text-stone-500 mt-1 font-mono">{p.name}</div>}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="text-[11px] text-stone-400 italic">לא צורף צילום לוח לשיעור זה</div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
                                         </div>
                                     ) : (
-                                        <div className="text-emerald-700 text-xs bg-emerald-50 p-2 rounded-lg border border-emerald-100">
-                                            ✨ מעולה! לא סומנו משימות בהבנה נמוכה. נראה שאת שולטת בחומר היטב.
+                                        <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
+                                            לא תועדו שיעורים למקצוע זה עדיין.
                                         </div>
                                     )}
                                 </div>
+                            )}
 
-                                <div>
-                                    <div className="text-xs font-bold text-stone-700 mb-1.5">🧩 תרגילים וסעיפים קשים שנרשמו במהלך הלמידה:</div>
-                                    {hardEx.length > 0 ? (
-                                        <div className="space-y-2">
-                                            {hardEx.map((item, idx) => (
-                                                <div key={idx} className="p-2.5 bg-stone-50 rounded-lg border border-stone-200 text-xs">
-                                                    <div className="flex justify-between items-center mb-1">
-                                                        <span className="font-bold text-stone-800">{item.title} {item.topic && `(${item.topic})`}</span>
-                                                        {item.date && <span className="text-stone-400" dir="ltr">{new Date(item.date).toLocaleDateString('he-IL')}</span>}
+                            {/* Section 3: Homework Tasks & Worksheets */}
+                            {printModeConfig?.includeHomeworkFiles && (
+                                <div className="mb-6">
+                                    <h2 className="text-base font-bold bg-indigo-50 text-indigo-900 p-2.5 mb-3 rounded-lg border border-indigo-200 flex items-center justify-between">
+                                        <span>📄 שיעורי בית, דפי עבודה ותרגילים ({homeworkTasksEnriched.length})</span>
+                                        <span className="text-xs font-normal text-indigo-700">פירוט המטלות ודפי העבודה</span>
+                                    </h2>
+                                    {homeworkTasksEnriched.length > 0 ? (
+                                        <div className="space-y-4">
+                                            {homeworkTasksEnriched.map((task, idx) => {
+                                                const files = task.loadedHwAttachments || [];
+                                                return (
+                                                    <div key={task.id || idx} className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 break-inside-avoid">
+                                                        <div className="flex items-center justify-between mb-2">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="font-bold text-stone-800 text-sm">{task.title}</span>
+                                                                {task.lessonTopic && (
+                                                                    <span className="text-xs text-purple-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-100">{task.lessonTopic}</span>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex items-center gap-2 text-xs">
+                                                                <span className="text-stone-500" dir="rtl">
+                                                                    {task.dueDate ? `הגשה: ${new Date(task.dueDate).toLocaleDateString('he-IL')}` : ''}
+                                                                </span>
+                                                                {task.completed ? (
+                                                                    <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 text-[11px] font-bold">הוגש ✅</span>
+                                                                ) : (
+                                                                    <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 text-[11px] font-bold">פתוח ⏳</span>
+                                                                )}
+                                                                {task.understandingRating && (
+                                                                    <span className="text-amber-800 font-bold bg-amber-100/80 px-2 py-0.5 rounded text-[11px]">הבנה: {task.understandingRating}/5</span>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        {task.hardExercises && (
+                                                            <div className="text-xs text-rose-800 bg-rose-50 p-2 rounded border border-rose-100 mb-2">
+                                                                <strong>תרגילים מאתגרים:</strong> {task.hardExercises}
+                                                            </div>
+                                                        )}
+                                                        {files.length > 0 ? (
+                                                            <div className="mt-2">
+                                                                <div className="text-[11px] font-bold text-indigo-800 mb-1.5">קובצי שיעורי בית ודפי עבודה ({files.length}):</div>
+                                                                <div className={`grid ${files.length === 1 ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
+                                                                    {files.map((f, fIdx) => {
+                                                                        const isImg = f.dataUrl && (f.dataUrl.startsWith('data:image/') || f.type?.startsWith('image/'));
+                                                                        return (
+                                                                            <div key={f.id || fIdx} className="border border-stone-300 rounded-lg p-2 bg-white text-center break-inside-avoid">
+                                                                                {isImg ? (
+                                                                                    <img 
+                                                                                        src={f.dataUrl} 
+                                                                                        alt={f.name || 'דף עבודה'} 
+                                                                                        className="max-h-72 w-auto max-w-full mx-auto object-contain rounded" 
+                                                                                    />
+                                                                                ) : (
+                                                                                    <div className="p-3 text-xs text-stone-700 bg-stone-50 rounded font-medium">
+                                                                                        📄 מסמך מצורף: {f.name}
+                                                                                    </div>
+                                                                                )}
+                                                                                {f.name && <div className="text-[10px] text-stone-500 mt-1 font-mono">{f.name}</div>}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        ) : null}
                                                     </div>
-                                                    <div className="text-rose-700 font-medium bg-white p-2 rounded border border-rose-100">
-                                                        {item.ex}
-                                                    </div>
-                                                </div>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
                                     ) : (
-                                        <div className="text-stone-500 text-xs italic p-2 bg-stone-50 rounded-lg border border-stone-200">
-                                            לא נרשמו תרגילים קשים ספציפיים במשימות.
+                                        <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
+                                            לא תועדו משימות שיעורי בית למקצוע זה.
                                         </div>
                                     )}
                                 </div>
-                            </div>
+                            )}
 
-                            {/* Section 4: Previous Exams & Grades */}
-                            <div className="mb-6">
-                                <h2 className="text-base font-bold bg-indigo-50 text-indigo-900 p-2.5 mb-3 rounded-lg border border-indigo-200 flex items-center justify-between">
-                                    <span>📊 היסטוריית מבחנים וציונים קודמים ב{subjectName}</span>
-                                    {examAvg && <span className="text-xs font-bold text-indigo-700">ממוצע מצטבר: {examAvg}</span>}
-                                </h2>
-                                {subjectExams.length > 0 ? (
-                                    <table className="w-full text-right border-collapse text-xs">
-                                        <thead>
-                                            <tr className="border-b-2 border-stone-300 text-stone-600">
-                                                <th className="py-1.5 px-2">בחינה</th>
-                                                <th className="py-1.5 px-2">תאריך</th>
-                                                <th className="py-1.5 px-2 text-center">ציון</th>
-                                                <th className="py-1.5 px-2 text-center">סטטוס</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-stone-200">
-                                            {subjectExams.map(e => (
-                                                <tr key={e.id}>
-                                                    <td className="py-1.5 px-2 font-bold text-stone-800">{e.examName}</td>
-                                                    <td className="py-1.5 px-2 text-stone-600" dir="rtl">{e.date ? new Date(e.date).toLocaleDateString('he-IL') : '-'}</td>
-                                                    <td className="py-1.5 px-2 text-center font-black text-indigo-700 text-sm">
-                                                        {e.grade ? e.grade : '-'}
-                                                    </td>
-                                                    <td className="py-1.5 px-2 text-center">
-                                                        {e.grade ? <span className="text-emerald-700 font-bold">הושלם</span> : <span className="text-amber-700 font-bold">עתידי</span>}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                ) : (
-                                    <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
-                                        טרם הוזנו מבחנים קודמים למקצוע זה במערכת.
+                            {/* Section 4: Weaknesses & Difficulties */}
+                            {printModeConfig?.includeWeaknesses && (
+                                <div className="mb-6 break-inside-avoid">
+                                    <h2 className="text-base font-bold bg-rose-50 text-rose-900 p-2.5 mb-3 rounded-lg border border-rose-200">
+                                        🎯 מוקדי קושי, נושאים לחיזוק ותרגילים מאתגרים
+                                    </h2>
+                                    
+                                    <div className="mb-3">
+                                        <div className="text-xs font-bold text-stone-700 mb-1.5">⚡ נושאים שסומנו בהבנה נמוכה (דורשים חזרה ממוקדת):</div>
+                                        {weakTasks.length > 0 ? (
+                                            <div className="space-y-1.5">
+                                                {weakTasks.map(t => (
+                                                    <div key={t.id} className="p-2 bg-rose-50/70 rounded-lg border border-rose-100 text-xs flex items-center justify-between">
+                                                        <span className="font-bold text-rose-800">{t.lessonTopic || t.title}</span>
+                                                        <span className="text-rose-600 font-bold bg-white px-2 py-0.5 rounded border border-rose-200">הבנה: {t.understandingRating}/5</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="text-emerald-700 text-xs bg-emerald-50 p-2 rounded-lg border border-emerald-100">
+                                                ✨ מעולה! לא סומנו משימות בהבנה נמוכה. נראה שאת שולטת בחומר היטב.
+                                            </div>
+                                        )}
                                     </div>
-                                )}
-                            </div>
 
-                            {/* Section 5: Exam Day Checklist */}
-                            <div className="mb-6 p-3.5 rounded-xl border-2 border-dashed border-stone-300 bg-stone-50/50 text-xs">
-                                <div className="font-bold text-stone-800 mb-2">📋 צ'ק-ליסט אישי לקראת המבחן:</div>
-                                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                                    <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> חזרה על כל הגדרות ונוסחאות החומר</div>
-                                    <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> פתרון חוזר של התרגילים המאתגרים</div>
-                                    <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> תרגול לפחות מבחן מתכונת אחד לדוגמה</div>
-                                    <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> שינה טובה וארוחת בוקר ביום הבחינה</div>
+                                    <div>
+                                        <div className="text-xs font-bold text-stone-700 mb-1.5">🧩 תרגילים וסעיפים קשים שנרשמו במהלך הלמידה:</div>
+                                        {hardEx.length > 0 ? (
+                                            <div className="space-y-2">
+                                                {hardEx.map((item, idx) => (
+                                                    <div key={idx} className="p-2.5 bg-stone-50 rounded-lg border border-stone-200 text-xs">
+                                                        <div className="flex justify-between items-center mb-1">
+                                                            <span className="font-bold text-stone-800">{item.title} {item.topic && `(${item.topic})`}</span>
+                                                            {item.date && <span className="text-stone-400" dir="ltr">{new Date(item.date).toLocaleDateString('he-IL')}</span>}
+                                                        </div>
+                                                        <div className="text-rose-700 font-medium bg-white p-2 rounded border border-rose-100">
+                                                            {item.ex}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="text-stone-500 text-xs italic p-2 bg-stone-50 rounded-lg border border-stone-200">
+                                                לא נרשמו תרגילים קשים ספציפיים במשימות.
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
-                            </div>
+                            )}
+
+                            {/* Section 5: Previous Exams & Grades */}
+                            {printModeConfig?.includeExams && (
+                                <div className="mb-6 break-inside-avoid">
+                                    <h2 className="text-base font-bold bg-indigo-50 text-indigo-900 p-2.5 mb-3 rounded-lg border border-indigo-200 flex items-center justify-between">
+                                        <span>📊 היסטוריית מבחנים וציונים קודמים ב{subjectName}</span>
+                                        {examAvg && <span className="text-xs font-bold text-indigo-700">ממוצע מצטבר: {examAvg}</span>}
+                                    </h2>
+                                    {subjectExams.length > 0 ? (
+                                        <table className="w-full text-right border-collapse text-xs">
+                                            <thead>
+                                                <tr className="border-b-2 border-stone-300 text-stone-600">
+                                                    <th className="py-1.5 px-2">בחינה</th>
+                                                    <th className="py-1.5 px-2">תאריך</th>
+                                                    <th className="py-1.5 px-2 text-center">ציון</th>
+                                                    <th className="py-1.5 px-2 text-center">סטטוס</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-stone-200">
+                                                {subjectExams.map(e => (
+                                                    <tr key={e.id}>
+                                                        <td className="py-1.5 px-2 font-bold text-stone-800">{e.examName}</td>
+                                                        <td className="py-1.5 px-2 text-stone-600" dir="rtl">{e.date ? new Date(e.date).toLocaleDateString('he-IL') : '-'}</td>
+                                                        <td className="py-1.5 px-2 text-center font-black text-indigo-700 text-sm">
+                                                            {e.grade ? e.grade : '-'}
+                                                        </td>
+                                                        <td className="py-1.5 px-2 text-center">
+                                                            {e.grade ? <span className="text-emerald-700 font-bold">הושלם</span> : <span className="text-amber-700 font-bold">עתידי</span>}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    ) : (
+                                        <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
+                                            טרם הוזנו מבחנים קודמים למקצוע זה במערכת.
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Section 6: Exam Day Checklist */}
+                            {printModeConfig?.includeChecklist && (
+                                <div className="mb-6 p-3.5 rounded-xl border-2 border-dashed border-stone-300 bg-stone-50/50 text-xs break-inside-avoid">
+                                    <div className="font-bold text-stone-800 mb-2">📋 צ'ק-ליסט אישי לקראת המבחן:</div>
+                                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                                        <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> חזרה על כל הגדרות ונוסחאות החומר</div>
+                                        <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> פתרון חוזר של התרגילים המאתגרים</div>
+                                        <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> תרגול לפחות מבחן מתכונת אחד לדוגמה</div>
+                                        <div className="flex items-center gap-2"><span className="w-3.5 h-3.5 border border-stone-400 rounded bg-white inline-block"></span> שינה טובה וארוחת בוקר ביום הבחינה</div>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Footer */}
                             <div className="text-center mt-6 text-xs text-stone-400 font-bold border-t border-stone-200 pt-3">
@@ -4190,6 +4412,33 @@ function App() {
                                             <h2 className="text-2xl font-bold text-stone-800 tracking-tight">יומן שיעורים 📚</h2>
                                             <p className="text-sm text-stone-500 mt-1">ריכוז של כל מה שלמדת בכיתה, מסודר לפי תאריכים ומקצועות.</p>
                                         </div>
+                                        {activeUserData.subjects && activeUserData.subjects.length > 0 && (
+                                            <button 
+                                                onClick={() => {
+                                                    const subId = lessonLogFilter !== 'all' ? lessonLogFilter : (logSubjects[0]?.id || activeUserData.subjects[0]?.id);
+                                                    if (!subId) {
+                                                        showToast('יש להגדיר לפחות מקצוע אחד כדי להדפיס', 'warning');
+                                                        return;
+                                                    }
+                                                    setExamPrintModal({
+                                                        subjectId: subId,
+                                                        mode: 'lessons',
+                                                        customSections: {
+                                                            summary: false,
+                                                            syllabus: false,
+                                                            lessonsWithBoard: true,
+                                                            homeworkWithFiles: false,
+                                                            weaknesses: false,
+                                                            exams: false,
+                                                            checklist: false
+                                                        }
+                                                    });
+                                                }}
+                                                className="bg-purple-50 hover:bg-purple-100 text-purple-700 px-4 py-2.5 rounded-2xl text-xs font-bold border border-purple-200 shadow-xs transition-all active:scale-95 flex items-center gap-2 self-start sm:self-auto"
+                                            >
+                                                <span>🖨️</span> הדפסת יומן וצילומי לוח
+                                            </button>
+                                        )}
                                     </div>
 
 
@@ -4232,40 +4481,81 @@ function App() {
                                                                     (סומן ללא שיעורי בית)
                                                                 </span>
                                                             )}
-                                                            {task.attachments && task.attachments.length > 0 && (
-                                                                <button 
-                                                                    type="button"
-                                                                    onClick={() => openAttachmentViewer(task)} 
-                                                                    className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5 transition-colors cursor-pointer"
-                                                                    title="צפייה בצילומי לוח ודפי עבודה"
-                                                                >
-                                                                    <span>🖼️</span> צפייה בצילומי לוח ({task.attachments.length})
-                                                                </button>
-                                                            )}
+                                                            {(() => {
+                                                                const allAtts = task.attachments || [];
+                                                                const boardAtts = allAtts.filter(a => a.category === 'board' || (!a.category && task.isLessonLog));
+                                                                const hwAtts = allAtts.filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
+
+                                                                return (
+                                                                    <>
+                                                                        {boardAtts.length > 0 && (
+                                                                            <button 
+                                                                                type="button"
+                                                                                onClick={() => openAttachmentViewer(task, 0, 'board')} 
+                                                                                className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                                                                                title="צפייה בצילומי לוח מהשיעור"
+                                                                            >
+                                                                                <span>📸</span> צילומי לוח ({boardAtts.length})
+                                                                            </button>
+                                                                        )}
+                                                                        {hwAtts.length > 0 && (
+                                                                            <button 
+                                                                                type="button"
+                                                                                onClick={() => openAttachmentViewer(task, 0, 'homework')} 
+                                                                                className="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg border border-indigo-200 flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                                                                                title="צפייה בקובצי שיעורי הבית של השיעור"
+                                                                            >
+                                                                                <span>📄</span> קובצי ש.ב ({hwAtts.length})
+                                                                            </button>
+                                                                        )}
+                                                                    </>
+                                                                );
+                                                            })()}
                                                         </div>
                                                         <h3 className="font-bold text-lg text-stone-800">{task.lessonTopic}</h3>
                                                         {!task.isLessonLog && <div className="text-sm text-stone-500 mt-1">מתוך משימה: {task.title}</div>}
                                                     </div>
-                                                    <div className="flex gap-2 shrink-0 border-t md:border-t-0 md:border-r border-stone-100 pt-3 md:pt-0 md:pr-4 items-center">
-                                                        <label className="bg-stone-50 text-stone-700 hover:text-purple-700 hover:bg-purple-50 border border-stone-200 hover:border-purple-200 px-3 py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-bold w-full md:w-auto active:scale-95 cursor-pointer shadow-xs" title="הוספת צילום לוח או דף עבודה לשיעור זה">
+                                                    <div className="flex gap-2 shrink-0 border-t md:border-t-0 md:border-r border-stone-100 pt-3 md:pt-0 md:pr-4 items-center flex-wrap">
+                                                        <label className="bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 px-3 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-bold w-full md:w-auto active:scale-95 cursor-pointer shadow-xs" title="הוספת צילום לוח מהשיעור">
                                                             <input 
                                                                 type="file" 
                                                                 multiple 
-                                                                accept="image/*,application/pdf" 
+                                                                accept="image/*" 
                                                                 className="hidden" 
                                                                 onChange={async (e) => {
                                                                     const files = Array.from(e.target.files || []);
                                                                     if (files.length === 0) return;
                                                                     for (const f of files) {
-                                                                        await handleQuickAddAttachmentToTask(task, f);
+                                                                        await handleQuickAddAttachmentToTask(task, f, 'board');
                                                                     }
                                                                     e.target.value = '';
                                                                 }} 
                                                             />
-                                                            <span>📷</span> צילום לוח
+                                                            <span>📸</span> + צילום לוח
                                                         </label>
-                                                        <button onClick={() => handleRemoveFromLessonLog(task.id)} className="bg-stone-50 text-stone-400 hover:text-rose-600 border border-stone-200 hover:border-rose-200 px-3 py-2.5 rounded-xl hover:bg-rose-50 transition-colors flex items-center justify-center gap-1.5 text-xs font-medium w-full md:w-auto active:scale-95" title="מחיקה מהיומן">
-                                                            <IconTrash className="w-4 h-4"/> מחיקה
+                                                        
+                                                        {!task.isLessonLog && (
+                                                            <label className="bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 px-3 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-bold w-full md:w-auto active:scale-95 cursor-pointer shadow-xs" title="הוספת דף עבודה או קובץ שיעורי בית">
+                                                                <input 
+                                                                    type="file" 
+                                                                    multiple 
+                                                                    accept="image/*,application/pdf" 
+                                                                    className="hidden" 
+                                                                    onChange={async (e) => {
+                                                                        const files = Array.from(e.target.files || []);
+                                                                        if (files.length === 0) return;
+                                                                        for (const f of files) {
+                                                                            await handleQuickAddAttachmentToTask(task, f, 'homework');
+                                                                        }
+                                                                        e.target.value = '';
+                                                                    }} 
+                                                                />
+                                                                <span>📄</span> + דף ש.ב
+                                                            </label>
+                                                        )}
+
+                                                        <button onClick={() => handleRemoveFromLessonLog(task.id)} className="bg-stone-50 text-stone-400 hover:text-rose-600 border border-stone-200 hover:border-rose-200 px-2.5 py-2 rounded-xl hover:bg-rose-50 transition-colors flex items-center justify-center gap-1 text-xs font-medium w-full md:w-auto active:scale-95" title="מחיקה מהיומן">
+                                                            <IconTrash className="w-4 h-4"/>
                                                         </button>
                                                     </div>
                                                 </div>
@@ -5030,6 +5320,41 @@ function App() {
                                                     <div className="text-stone-700 text-sm bg-white p-4 rounded-2xl border border-stone-200 mr-2 font-medium shadow-inner">
                                                         <span className="text-rose-600 font-bold block mb-1">📌 שאלות שסומנו לחזרה:</span> 
                                                         {t.hardExercises}
+                                                    </div>
+
+                                                    {/* צפייה ישירה או צירוף של דף העבודה / ש.ב */}
+                                                    <div className="mt-3 mr-2">
+                                                        {t.attachments && t.attachments.length > 0 ? (
+                                                            <button 
+                                                                type="button"
+                                                                onClick={() => openAttachmentViewer(t)}
+                                                                className="w-full py-2.5 px-4 bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all active:scale-98 shadow-xs"
+                                                                title="פתיחת קובץ שיעורי הבית / דף העבודה"
+                                                            >
+                                                                <span>📎</span>
+                                                                <span>צפייה בדף העבודה / בקובץ המשימה ({t.attachments.length})</span>
+                                                                <span className="text-purple-700 bg-purple-200/70 px-2 py-0.5 rounded text-[11px] font-bold">פתיחה ↗</span>
+                                                            </button>
+                                                        ) : (
+                                                            <label className="w-full py-2 px-3 bg-white hover:bg-purple-50/50 text-stone-600 hover:text-purple-700 border border-dashed border-stone-300 hover:border-purple-300 rounded-xl font-semibold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer">
+                                                                <input 
+                                                                    type="file" 
+                                                                    multiple 
+                                                                    accept="image/*,application/pdf" 
+                                                                    className="hidden" 
+                                                                    onChange={async (e) => {
+                                                                        const files = Array.from(e.target.files || []);
+                                                                        if (files.length === 0) return;
+                                                                        for (const f of files) {
+                                                                            await handleQuickAddAttachmentToTask(t, f, 'homework');
+                                                                        }
+                                                                        e.target.value = '';
+                                                                    }} 
+                                                                />
+                                                                <span>➕</span>
+                                                                <span>צירוף דף העבודה / צילום התרגיל למשימה זו</span>
+                                                            </label>
+                                                        )}
                                                     </div>
                                                 </div>
                                             )
@@ -5906,60 +6231,123 @@ function App() {
                                         </div>
                                     )}
 
-                                    {/* צילומים וקבצים מצורפים */}
+                                    {/* 1. צילומי לוח מהשיעור */}
                                     <div className="pt-2 border-t border-stone-100">
                                         <div className="flex items-center justify-between mb-1.5">
-                                            <label className="text-xs font-bold text-stone-500 uppercase tracking-wide flex items-center gap-1.5">
-                                                <IconPaperclip className="w-3.5 h-3.5 text-purple-600"/>
-                                                צילומי לוח / דפי עבודה (תמונות ו-PDF)
+                                            <label className="text-xs font-bold text-stone-600 uppercase tracking-wide flex items-center gap-1.5">
+                                                <span>📸</span>
+                                                צילום לוח מהשיעור (תמונות מהכיתה)
                                             </label>
-                                            {taskFormAttachments.length > 0 && (
-                                                <span className="text-[11px] font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">
-                                                    {taskFormAttachments.length} קבצים
+                                            {taskFormAttachments.filter(a => a.category === 'board').length > 0 && (
+                                                <span className="text-[11px] font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full">
+                                                    {taskFormAttachments.filter(a => a.category === 'board').length} צילומי לוח
                                                 </span>
                                             )}
                                         </div>
                                         
-                                        <label className="flex items-center justify-center gap-2 p-3 border-2 border-dashed border-stone-200 hover:border-purple-300 rounded-2xl cursor-pointer bg-stone-50 hover:bg-purple-50/40 transition-all text-xs font-bold text-stone-600 active:scale-[0.99]">
+                                        <label className="flex items-center justify-center gap-2 p-2.5 border-2 border-dashed border-purple-200 hover:border-purple-400 rounded-2xl cursor-pointer bg-purple-50/30 hover:bg-purple-50/60 transition-all text-xs font-bold text-purple-900 active:scale-[0.99]">
                                             <input 
                                                 type="file" 
                                                 multiple 
-                                                accept="image/*,application/pdf" 
+                                                accept="image/*" 
                                                 className="hidden" 
-                                                onChange={(e) => handleFilesSelected(e, 'new')} 
+                                                onChange={(e) => handleFilesSelected(e, 'new', 'board')} 
                                                 disabled={isUploadingAttachment}
                                             />
                                             {isUploadingAttachment ? (
                                                 <span className="flex items-center gap-2 text-purple-600 animate-pulse">
-                                                    <span>מעבד קובץ... ⏳</span>
+                                                    <span>מעבד תמונה... ⏳</span>
                                                 </span>
                                             ) : (
                                                 <span className="flex items-center gap-2">
-                                                    <span className="text-base">📸</span>
-                                                    <span>העלאת תמונת לוח או קובץ PDF</span>
+                                                    <span className="text-base">📷</span>
+                                                    <span>העלאת צילום לוח</span>
                                                 </span>
                                             )}
                                         </label>
 
-                                        {taskFormAttachments.length > 0 && (
+                                        {taskFormAttachments.filter(a => a.category === 'board').length > 0 && (
                                             <div className="mt-2 flex flex-wrap gap-2">
-                                                {taskFormAttachments.map((att, idx) => (
-                                                    <div key={att.id || idx} className="flex items-center gap-1.5 bg-purple-50 border border-purple-100 text-purple-800 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
-                                                        <span>{att.type === 'application/pdf' || att.name?.toLowerCase().endsWith('.pdf') ? '📄' : '🖼️'}</span>
-                                                        <span className="truncate max-w-[140px]" title={att.name}>{att.name}</span>
-                                                        <span className="text-[10px] text-stone-400">({Math.round((att.size || 0) / 1024)}KB)</span>
-                                                        <button 
-                                                            type="button" 
-                                                            onClick={() => setTaskFormAttachments(prev => prev.filter((_, i) => i !== idx))} 
-                                                            className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
-                                                        >
-                                                            ✕
-                                                        </button>
-                                                    </div>
-                                                ))}
+                                                {taskFormAttachments.map((att, idx) => {
+                                                    if (att.category !== 'board') return null;
+                                                    return (
+                                                        <div key={att.id || idx} className="flex items-center gap-1.5 bg-purple-50 border border-purple-200 text-purple-900 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
+                                                            <span>📸</span>
+                                                            <span className="truncate max-w-[130px]" title={att.name}>{att.name}</span>
+                                                            <span className="text-[10px] text-purple-500">({Math.round((att.size || 0) / 1024)}KB)</span>
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => setTaskFormAttachments(prev => prev.filter((_, i) => i !== idx))} 
+                                                                className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
+                                                            >
+                                                                ✕
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                })}
                                             </div>
                                         )}
                                     </div>
+
+                                    {/* 2. קבצי שיעורי בית ודפי עבודה (אם יש ש.ב) */}
+                                    {taskFormHasHW && (
+                                        <div className="pt-2 border-t border-stone-100">
+                                            <div className="flex items-center justify-between mb-1.5">
+                                                <label className="text-xs font-bold text-stone-600 uppercase tracking-wide flex items-center gap-1.5">
+                                                    <span>📄</span>
+                                                    דפי עבודה וקובצי ש.ב (PDF / תמונות)
+                                                </label>
+                                                {taskFormAttachments.filter(a => a.category === 'homework' || (!a.category && a.category !== 'board')).length > 0 && (
+                                                    <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full">
+                                                        {taskFormAttachments.filter(a => a.category === 'homework' || (!a.category && a.category !== 'board')).length} קבצי ש.ב
+                                                    </span>
+                                                )}
+                                            </div>
+                                            
+                                            <label className="flex items-center justify-center gap-2 p-2.5 border-2 border-dashed border-indigo-200 hover:border-indigo-400 rounded-2xl cursor-pointer bg-indigo-50/30 hover:bg-indigo-50/60 transition-all text-xs font-bold text-indigo-900 active:scale-[0.99]">
+                                                <input 
+                                                    type="file" 
+                                                    multiple 
+                                                    accept="image/*,application/pdf" 
+                                                    className="hidden" 
+                                                    onChange={(e) => handleFilesSelected(e, 'new', 'homework')} 
+                                                    disabled={isUploadingAttachment}
+                                                />
+                                                {isUploadingAttachment ? (
+                                                    <span className="flex items-center gap-2 text-indigo-600 animate-pulse">
+                                                        <span>מעבד קובץ... ⏳</span>
+                                                    </span>
+                                                ) : (
+                                                    <span className="flex items-center gap-2">
+                                                        <span className="text-base">📑</span>
+                                                        <span>העלאת דף עבודה / קובץ ש.ב</span>
+                                                    </span>
+                                                )}
+                                            </label>
+
+                                            {taskFormAttachments.filter(a => a.category === 'homework' || (!a.category && a.category !== 'board')).length > 0 && (
+                                                <div className="mt-2 flex flex-wrap gap-2">
+                                                    {taskFormAttachments.map((att, idx) => {
+                                                        if (att.category === 'board') return null;
+                                                        return (
+                                                            <div key={att.id || idx} className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
+                                                                <span>{att.type === 'application/pdf' || att.name?.toLowerCase().endsWith('.pdf') ? '📄' : '🖼️'}</span>
+                                                                <span className="truncate max-w-[130px]" title={att.name}>{att.name}</span>
+                                                                <span className="text-[10px] text-indigo-500">({Math.round((att.size || 0) / 1024)}KB)</span>
+                                                                <button 
+                                                                    type="button" 
+                                                                    onClick={() => setTaskFormAttachments(prev => prev.filter((_, i) => i !== idx))} 
+                                                                    className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
+                                                                >
+                                                                    ✕
+                                                                </button>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
 
                                     <button type="submit" className="w-full bg-stone-800 text-white rounded-2xl py-3.5 font-bold text-base shadow-md hover:bg-stone-900 transition-colors mt-2 active:scale-95">
                                         {taskFormHasHW ? 'שמירת משימה' : 'תיעוד שיעור'}
@@ -6014,57 +6402,118 @@ function App() {
                                             <input name="startTime" type="time" defaultValue={editingTask.startTime || ''} className="w-full p-3 bg-white border border-stone-200 rounded-2xl text-sm" />
                                         </div>
                                     )}
-                                    {/* צילומים וקבצים מצורפים בעריכה */}
+                                    {/* 1. צילומי לוח מהשיעור בעריכה */}
                                     <div className="pt-2 border-t border-stone-100">
                                         <div className="flex items-center justify-between mb-1.5">
-                                            <label className="text-xs font-bold text-stone-500 uppercase tracking-wide flex items-center gap-1.5">
-                                                <IconPaperclip className="w-3.5 h-3.5 text-purple-600"/>
-                                                צילומי לוח / דפי עבודה (תמונות ו-PDF)
+                                            <label className="text-xs font-bold text-stone-600 uppercase tracking-wide flex items-center gap-1.5">
+                                                <span>📸</span>
+                                                צילום לוח מהשיעור (תמונות מהכיתה)
                                             </label>
-                                            {editTaskAttachments.length > 0 && (
-                                                <span className="text-[11px] font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">
-                                                    {editTaskAttachments.length} קבצים
+                                            {editTaskAttachments.filter(a => a.category === 'board').length > 0 && (
+                                                <span className="text-[11px] font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full">
+                                                    {editTaskAttachments.filter(a => a.category === 'board').length} צילומי לוח
                                                 </span>
                                             )}
                                         </div>
                                         
-                                        <label className="flex items-center justify-center gap-2 p-3 border-2 border-dashed border-stone-200 hover:border-purple-300 rounded-2xl cursor-pointer bg-stone-50 hover:bg-purple-50/40 transition-all text-xs font-bold text-stone-600 active:scale-[0.99]">
+                                        <label className="flex items-center justify-center gap-2 p-2.5 border-2 border-dashed border-purple-200 hover:border-purple-400 rounded-2xl cursor-pointer bg-purple-50/30 hover:bg-purple-50/60 transition-all text-xs font-bold text-purple-900 active:scale-[0.99]">
+                                            <input 
+                                                type="file" 
+                                                multiple 
+                                                accept="image/*" 
+                                                className="hidden" 
+                                                onChange={(e) => handleFilesSelected(e, 'edit', 'board')} 
+                                                disabled={isUploadingAttachment}
+                                            />
+                                            {isUploadingAttachment ? (
+                                                <span className="flex items-center gap-2 text-purple-600 animate-pulse">
+                                                    <span>מעבד תמונה... ⏳</span>
+                                                </span>
+                                            ) : (
+                                                <span className="flex items-center gap-2">
+                                                    <span className="text-base">📷</span>
+                                                    <span>הוספת צילום לוח</span>
+                                                </span>
+                                            )}
+                                        </label>
+
+                                        {editTaskAttachments.filter(a => a.category === 'board').length > 0 && (
+                                            <div className="mt-2 flex flex-wrap gap-2">
+                                                {editTaskAttachments.map((att, idx) => {
+                                                    if (att.category !== 'board') return null;
+                                                    return (
+                                                        <div key={att.id || idx} className="flex items-center gap-1.5 bg-purple-50 border border-purple-200 text-purple-900 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
+                                                            <span>📸</span>
+                                                            <span className="truncate max-w-[130px]" title={att.name}>{att.name}</span>
+                                                            <span className="text-[10px] text-purple-500">({Math.round((att.size || 0) / 1024)}KB)</span>
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => setEditTaskAttachments(prev => prev.filter((_, i) => i !== idx))} 
+                                                                className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
+                                                            >
+                                                                ✕
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* 2. דפי עבודה ושיעורי בית בעריכה */}
+                                    <div className="pt-2 border-t border-stone-100">
+                                        <div className="flex items-center justify-between mb-1.5">
+                                            <label className="text-xs font-bold text-stone-600 uppercase tracking-wide flex items-center gap-1.5">
+                                                <span>📄</span>
+                                                דפי עבודה וקובצי ש.ב (PDF / תמונות)
+                                            </label>
+                                            {editTaskAttachments.filter(a => a.category === 'homework' || (!a.category && a.category !== 'board')).length > 0 && (
+                                                <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full">
+                                                    {editTaskAttachments.filter(a => a.category === 'homework' || (!a.category && a.category !== 'board')).length} קבצי ש.ב
+                                                </span>
+                                            )}
+                                        </div>
+                                        
+                                        <label className="flex items-center justify-center gap-2 p-2.5 border-2 border-dashed border-indigo-200 hover:border-indigo-400 rounded-2xl cursor-pointer bg-indigo-50/30 hover:bg-indigo-50/60 transition-all text-xs font-bold text-indigo-900 active:scale-[0.99]">
                                             <input 
                                                 type="file" 
                                                 multiple 
                                                 accept="image/*,application/pdf" 
                                                 className="hidden" 
-                                                onChange={(e) => handleFilesSelected(e, 'edit')} 
+                                                onChange={(e) => handleFilesSelected(e, 'edit', 'homework')} 
                                                 disabled={isUploadingAttachment}
                                             />
                                             {isUploadingAttachment ? (
-                                                <span className="flex items-center gap-2 text-purple-600 animate-pulse">
+                                                <span className="flex items-center gap-2 text-indigo-600 animate-pulse">
                                                     <span>מעבד קובץ... ⏳</span>
                                                 </span>
                                             ) : (
                                                 <span className="flex items-center gap-2">
-                                                    <span className="text-base">📸</span>
-                                                    <span>הוספת צילום לוח או קובץ PDF</span>
+                                                    <span className="text-base">📑</span>
+                                                    <span>הוספת דף עבודה / קובץ ש.ב</span>
                                                 </span>
                                             )}
                                         </label>
 
-                                        {editTaskAttachments.length > 0 && (
+                                        {editTaskAttachments.filter(a => a.category === 'homework' || (!a.category && a.category !== 'board')).length > 0 && (
                                             <div className="mt-2 flex flex-wrap gap-2">
-                                                {editTaskAttachments.map((att, idx) => (
-                                                    <div key={att.id || idx} className="flex items-center gap-1.5 bg-purple-50 border border-purple-100 text-purple-800 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
-                                                        <span>{att.type === 'application/pdf' || att.name?.toLowerCase().endsWith('.pdf') ? '📄' : '🖼️'}</span>
-                                                        <span className="truncate max-w-[140px]" title={att.name}>{att.name}</span>
-                                                        <span className="text-[10px] text-stone-400">({Math.round((att.size || 0) / 1024)}KB)</span>
-                                                        <button 
-                                                            type="button" 
-                                                            onClick={() => setEditTaskAttachments(prev => prev.filter((_, i) => i !== idx))} 
-                                                            className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
-                                                        >
-                                                            ✕
-                                                        </button>
-                                                    </div>
-                                                ))}
+                                                {editTaskAttachments.map((att, idx) => {
+                                                    if (att.category === 'board') return null;
+                                                    return (
+                                                        <div key={att.id || idx} className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
+                                                            <span>{att.type === 'application/pdf' || att.name?.toLowerCase().endsWith('.pdf') ? '📄' : '🖼️'}</span>
+                                                            <span className="truncate max-w-[130px]" title={att.name}>{att.name}</span>
+                                                            <span className="text-[10px] text-indigo-500">({Math.round((att.size || 0) / 1024)}KB)</span>
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => setEditTaskAttachments(prev => prev.filter((_, i) => i !== idx))} 
+                                                                className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
+                                                            >
+                                                                ✕
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                })}
                                             </div>
                                         )}
                                     </div>
@@ -7008,28 +7457,53 @@ function App() {
                                             </button>
                                         )}
 
-                                        <label className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-stone-50 hover:bg-purple-50 hover:text-purple-800 text-stone-700 border border-stone-200 hover:border-purple-200 transition-all font-bold text-sm active:scale-98 cursor-pointer">
+                                        <label className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-purple-50/50 hover:bg-purple-100 text-purple-900 border border-purple-200 transition-all font-bold text-sm active:scale-98 cursor-pointer">
                                             <input 
                                                 type="file" 
                                                 multiple 
-                                                accept="image/*,application/pdf" 
+                                                accept="image/*" 
                                                 className="hidden" 
                                                 onChange={async (e) => {
                                                     const files = Array.from(e.target.files || []);
                                                     if (files.length === 0) return;
                                                     for (const f of files) {
-                                                        await handleQuickAddAttachmentToTask(task, f);
+                                                        await handleQuickAddAttachmentToTask(task, f, 'board');
                                                     }
                                                     e.target.value = '';
                                                     setTaskActionsMenu(null);
                                                 }} 
                                             />
                                             <div className="flex items-center gap-3">
-                                                <span className="text-xl">📎</span>
-                                                <span>הוספת צילום לוח / דף עבודה</span>
+                                                <span className="text-xl">📸</span>
+                                                <span>הוספת צילום לוח מהשיעור</span>
                                             </div>
-                                            <span className="text-stone-400 text-xs">+ קובץ</span>
+                                            <span className="text-purple-600 bg-purple-100 px-2 py-0.5 rounded text-[11px] font-bold">+ לוח</span>
                                         </label>
+
+                                        {!task.isLessonLog && (
+                                            <label className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-indigo-50/50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 transition-all font-bold text-sm active:scale-98 cursor-pointer">
+                                                <input 
+                                                    type="file" 
+                                                    multiple 
+                                                    accept="image/*,application/pdf" 
+                                                    className="hidden" 
+                                                    onChange={async (e) => {
+                                                        const files = Array.from(e.target.files || []);
+                                                        if (files.length === 0) return;
+                                                        for (const f of files) {
+                                                            await handleQuickAddAttachmentToTask(task, f, 'homework');
+                                                        }
+                                                        e.target.value = '';
+                                                        setTaskActionsMenu(null);
+                                                    }} 
+                                                />
+                                                <div className="flex items-center gap-3">
+                                                    <span className="text-xl">📄</span>
+                                                    <span>הוספת דף עבודה / ש.ב</span>
+                                                </div>
+                                                <span className="text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded text-[11px] font-bold">+ ש.ב</span>
+                                            </label>
+                                        )}
                                         <button 
                                             onClick={() => {
                                                 setEditingTask(task);
@@ -7490,6 +7964,291 @@ function App() {
                             </div>
                         );
                     })()}
+
+                    {examPrintModal && (
+                        <div className="fixed inset-0 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-[fadeIn_0.2s_ease-out]"
+                             onClick={() => !isPreparingPrint && setExamPrintModal(null)}>
+                            <div className="bg-white rounded-3xl p-6 md:p-8 max-w-lg w-full shadow-2xl border border-stone-100 max-h-[90vh] overflow-y-auto" 
+                                 dir="rtl"
+                                 onClick={(e) => e.stopPropagation()}>
+                                {/* Header */}
+                                <div className="flex items-center justify-between mb-5 border-b border-stone-100 pb-3">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-2xl bg-purple-50 text-purple-700 flex items-center justify-center text-xl font-bold">
+                                            🖨️
+                                        </div>
+                                        <div>
+                                            <h3 className="text-xl font-black text-stone-900">הפקת חוברת / הדפסה</h3>
+                                            <p className="text-xs text-stone-500 font-medium">
+                                                {(() => {
+                                                    const sub = (activeUserData.subjects || []).find(s => s.id === examPrintModal.subjectId || s.name === examPrintModal.subjectId);
+                                                    return sub ? `${sub.emoji || '📖'} ${sub.name}` : (examPrintModal.subjectId || 'כללי');
+                                                })()}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        type="button"
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(null)}
+                                        disabled={isPreparingPrint}
+                                        className="text-stone-400 hover:text-stone-600 w-8 h-8 rounded-full hover:bg-stone-100 flex items-center justify-center transition-all text-lg font-bold"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+
+                                {/* Selection Options */}
+                                <div className="space-y-3 mb-6">
+                                    <div className="text-xs font-bold text-stone-700 mb-1">בחרי את פורמט ההדפסה הרצוי:</div>
+
+                                    {/* Option 1: All */}
+                                    <div 
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'all' }))}
+                                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
+                                            examPrintModal.mode === 'all' 
+                                                ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
+                                                : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
+                                        }`}
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
+                                                examPrintModal.mode === 'all' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
+                                            }`}>
+                                                {examPrintModal.mode === 'all' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                                            </div>
+                                            <div>
+                                                <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
+                                                    <span>🌟 חוברת הכנה מקיפה (הכל ביחד)</span>
+                                                </div>
+                                                <p className="text-xs text-stone-500 mt-1">
+                                                    הכל ביחד: סילבוס, תרגילים קשים, יומן שיעורים עם צילומי לוח, דפי עבודה של ש.ב והיסטוריית ציונים.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Option 2: Lessons & Board Photos Only */}
+                                    <div 
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'lessons' }))}
+                                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
+                                            examPrintModal.mode === 'lessons' 
+                                                ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
+                                                : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
+                                        }`}
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
+                                                examPrintModal.mode === 'lessons' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
+                                            }`}>
+                                                {examPrintModal.mode === 'lessons' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                                            </div>
+                                            <div>
+                                                <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
+                                                    <span>📸 יומן שיעורים וצילומי לוח בלבד</span>
+                                                </div>
+                                                <p className="text-xs text-stone-500 mt-1">
+                                                    רק כותרות השיעורים, התאריכים וצילומי הלוח מהכיתה (ללא שיעורי בית וללא נספחים).
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Option 3: Homework & Worksheets Only */}
+                                    <div 
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'homework' }))}
+                                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
+                                            examPrintModal.mode === 'homework' 
+                                                ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
+                                                : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
+                                        }`}
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
+                                                examPrintModal.mode === 'homework' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
+                                            }`}>
+                                                {examPrintModal.mode === 'homework' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                                            </div>
+                                            <div>
+                                                <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
+                                                    <span>📄 דפי עבודה ושיעורי בית בלבד</span>
+                                                </div>
+                                                <p className="text-xs text-stone-500 mt-1">
+                                                    רק שמות המטלות, שאלות שיעורי הבית וקבצי דפי העבודה המצורפים (ללא צילומי לוח מהכיתה).
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Option 4: Custom */}
+                                    <div 
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'custom' }))}
+                                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
+                                            examPrintModal.mode === 'custom' 
+                                                ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
+                                                : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
+                                        }`}
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
+                                                examPrintModal.mode === 'custom' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
+                                            }`}>
+                                                {examPrintModal.mode === 'custom' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                                            </div>
+                                            <div className="flex-1">
+                                                <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
+                                                    <span>⚙️ התאמה אישית של תוכן ההדפסה</span>
+                                                </div>
+                                                <p className="text-xs text-stone-500 mt-1">
+                                                    בחרי ידנית אילו מקטעים לכלול בדף המודפס:
+                                                </p>
+
+                                                {/* Checkboxes */}
+                                                {examPrintModal.mode === 'custom' && (
+                                                    <div className="mt-3 pt-3 border-t border-purple-200/80 space-y-2 text-xs">
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={examPrintModal.customSections?.summary ?? true}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.checked;
+                                                                    setExamPrintModal(prev => ({
+                                                                        ...prev,
+                                                                        customSections: { ...prev.customSections, summary: val }
+                                                                    }));
+                                                                }}
+                                                                className="rounded text-purple-600 focus:ring-purple-500"
+                                                            />
+                                                            <span className="font-medium text-stone-700">מדדי סיכום (KPI)</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={examPrintModal.customSections?.syllabus ?? true}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.checked;
+                                                                    setExamPrintModal(prev => ({
+                                                                        ...prev,
+                                                                        customSections: { ...prev.customSections, syllabus: val }
+                                                                    }));
+                                                                }}
+                                                                className="rounded text-purple-600 focus:ring-purple-500"
+                                                            />
+                                                            <span className="font-medium text-stone-700">סילבוס ונושאי לימוד</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={examPrintModal.customSections?.lessonsWithBoard ?? true}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.checked;
+                                                                    setExamPrintModal(prev => ({
+                                                                        ...prev,
+                                                                        customSections: { ...prev.customSections, lessonsWithBoard: val }
+                                                                    }));
+                                                                }}
+                                                                className="rounded text-purple-600 focus:ring-purple-500"
+                                                            />
+                                                            <span className="font-medium text-stone-700">📸 יומן שיעורים וצילומי לוח</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={examPrintModal.customSections?.homeworkWithFiles ?? true}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.checked;
+                                                                    setExamPrintModal(prev => ({
+                                                                        ...prev,
+                                                                        customSections: { ...prev.customSections, homeworkWithFiles: val }
+                                                                    }));
+                                                                }}
+                                                                className="rounded text-purple-600 focus:ring-purple-500"
+                                                            />
+                                                            <span className="font-medium text-stone-700">📄 שיעורי בית וקובצי דפי עבודה</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={examPrintModal.customSections?.weaknesses ?? true}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.checked;
+                                                                    setExamPrintModal(prev => ({
+                                                                        ...prev,
+                                                                        customSections: { ...prev.customSections, weaknesses: val }
+                                                                    }));
+                                                                }}
+                                                                className="rounded text-purple-600 focus:ring-purple-500"
+                                                            />
+                                                            <span className="font-medium text-stone-700">מוקדי קושי ותרגילים מאתגרים</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={examPrintModal.customSections?.exams ?? true}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.checked;
+                                                                    setExamPrintModal(prev => ({
+                                                                        ...prev,
+                                                                        customSections: { ...prev.customSections, exams: val }
+                                                                    }));
+                                                                }}
+                                                                className="rounded text-purple-600 focus:ring-purple-500"
+                                                            />
+                                                            <span className="font-medium text-stone-700">מבחנים קודמים וציונים</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={examPrintModal.customSections?.checklist ?? true}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.checked;
+                                                                    setExamPrintModal(prev => ({
+                                                                        ...prev,
+                                                                        customSections: { ...prev.customSections, checklist: val }
+                                                                    }));
+                                                                }}
+                                                                className="rounded text-purple-600 focus:ring-purple-500"
+                                                            />
+                                                            <span className="font-medium text-stone-700">צ'ק-ליסט אישי ליום הבחינה</span>
+                                                        </label>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Action Buttons */}
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setExamPrintModal(null)}
+                                        disabled={isPreparingPrint}
+                                        className="flex-1 py-3 px-4 rounded-xl text-stone-600 hover:bg-stone-100 font-bold text-sm transition-all border border-stone-200 cursor-pointer"
+                                    >
+                                        ביטול
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => prepareAndPrintExam(examPrintModal.subjectId, examPrintModal.mode, examPrintModal.customSections)}
+                                        disabled={isPreparingPrint}
+                                        className="flex-2 py-3 px-6 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-sm shadow-md transition-all active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+                                    >
+                                        {isPreparingPrint ? (
+                                            <>
+                                                <span className="animate-spin text-lg">⏳</span>
+                                                <span>מכין תמונות וקבצים להדפסה...</span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <span>🖨️</span>
+                                                <span>הדפסה / שמירה כ-PDF</span>
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {isMoreMenuOpen && (
                         <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-xs z-[75] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]"

@@ -134,7 +134,7 @@ const FileStorage = (() => {
      * Process and save an attachment (Image or PDF)
      * Returns the lightweight metadata object to be saved in the task!
      */
-    const processAndSaveFile = async (file) => {
+    const processAndSaveFile = async (file, category = 'general') => {
         if (!file) return null;
 
         const id = 'att_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
@@ -165,6 +165,7 @@ const FileStorage = (() => {
             name,
             type: isPdf ? 'application/pdf' : (isImage ? 'image/jpeg' : type),
             size: sizeInBytes,
+            category: category || 'general',
             dataUrl,
             uploadedAt: new Date().toISOString()
         };
@@ -181,6 +182,7 @@ const FileStorage = (() => {
                     name,
                     type: item.type,
                     size: item.size,
+                    category: item.category,
                     dataUrl,
                     uploadedAt: item.uploadedAt
                 }).catch(err => {
@@ -197,6 +199,7 @@ const FileStorage = (() => {
             name,
             type: item.type,
             size: item.size,
+            category: item.category,
             uploadedAt: item.uploadedAt
         };
     };
