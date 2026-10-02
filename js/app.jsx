@@ -1102,6 +1102,92 @@ function App() {
             const [taskToCancel, setTaskToCancel] = useState(null);
             const [taskToGiveUp, setTaskToGiveUp] = useState(null);
             const [activeExamForGrade, setActiveExamForGrade] = useState(null);
+            const [viewingAttachment, setViewingAttachment] = useState(null);
+            const [taskFormAttachments, setTaskFormAttachments] = useState([]);
+            const [editTaskAttachments, setEditTaskAttachments] = useState([]);
+            const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+
+            useEffect(() => {
+                if (editingTask) {
+                    setEditTaskAttachments(editingTask.attachments || []);
+                } else {
+                    setEditTaskAttachments([]);
+                }
+            }, [editingTask]);
+
+            const handleFilesSelected = async (e, target = 'new') => {
+                const files = Array.from(e.target.files || []);
+                if (files.length === 0) return;
+                setIsUploadingAttachment(true);
+                try {
+                    const processedList = [];
+                    for (const f of files) {
+                        showToast(`מעבד: ${f.name}... ⏳`, 'info');
+                        const saved = await window.FileStorage.processAndSaveFile(f);
+                        if (saved) processedList.push(saved);
+                    }
+                    if (target === 'new') {
+                        setTaskFormAttachments(prev => [...prev, ...processedList]);
+                    } else if (target === 'edit') {
+                        setEditTaskAttachments(prev => [...prev, ...processedList]);
+                    }
+                    showToast(`התווספו ${processedList.length} קבצים בהצלחה! 📎`, 'success');
+                } catch (err) {
+                    console.error('File process error:', err);
+                    showToast('שגיאה בעיבוד הקובץ: ' + (err.message || err), 'error');
+                } finally {
+                    setIsUploadingAttachment(false);
+                    e.target.value = '';
+                }
+            };
+
+            const handleQuickAddAttachmentToTask = async (task, file) => {
+                if (!task || !file) return;
+                setIsUploadingAttachment(true);
+                try {
+                    showToast(`מעבד קובץ למשימה... ⏳`, 'info');
+                    const saved = await window.FileStorage.processAndSaveFile(file);
+                    if (saved) {
+                        const updatedAttachments = [...(task.attachments || []), saved];
+                        updateUserData(prev => ({
+                            ...prev,
+                            tasks: prev.tasks.map(t => t.id === task.id ? { ...t, attachments: updatedAttachments } : t)
+                        }));
+                        showToast(`הקובץ ${saved.name} צורף למשימה בהצלחה! 📎`, 'success');
+                    }
+                } catch (err) {
+                    console.error('Quick attachment error:', err);
+                    showToast('שגיאה בצירוף הקובץ: ' + (err.message || err), 'error');
+                } finally {
+                    setIsUploadingAttachment(false);
+                }
+            };
+
+            const openAttachmentViewer = async (task, initialIndex = 0) => {
+                const attachments = task.attachments || [];
+                if (attachments.length === 0) return;
+                const activeIndex = Math.min(initialIndex, attachments.length - 1);
+                setViewingAttachment({
+                    task,
+                    attachments,
+                    activeIndex,
+                    currentDataUrl: null,
+                    loading: true
+                });
+                const dataUrl = await window.FileStorage.loadAttachmentData(attachments[activeIndex]);
+                setViewingAttachment(prev => prev ? {
+                    ...prev,
+                    currentDataUrl: dataUrl,
+                    loading: false
+                } : null);
+            };
+
+            const switchAttachmentIndex = async (newIndex) => {
+                if (!viewingAttachment || !viewingAttachment.attachments[newIndex]) return;
+                setViewingAttachment(prev => ({ ...prev, activeIndex: newIndex, currentDataUrl: null, loading: true }));
+                const dataUrl = await window.FileStorage.loadAttachmentData(viewingAttachment.attachments[newIndex]);
+                setViewingAttachment(prev => prev ? { ...prev, currentDataUrl: dataUrl, loading: false } : null);
+            };
             const [activeFriend, setActiveFriend] = useState(null);
             const [editingSubject, setEditingSubject] = useState(null);
             const [tempRules, setTempRules] = useState([]);
@@ -1524,6 +1610,7 @@ function App() {
             const handleAddTask = (taskData, hasHW) => {
                 const now = new Date();
                 const actualGivenDate = taskData.givenDate || now.toISOString().split('T')[0];
+                const attachments = taskData.attachments || taskFormAttachments || [];
                 
                 if (!hasHW) {
                     const noHwTask = {
@@ -1537,13 +1624,15 @@ function App() {
                         isLessonLog: true,
                         understandingRating: null,
                         pointsEarned: 0,
-                        givenDate: actualGivenDate
+                        givenDate: actualGivenDate,
+                        attachments: attachments
                     };
                     
                     updateUserData(prev => checkAndAwardBadges({ 
                         ...prev, 
                         tasks: [noHwTask, ...prev.tasks]
                     }));
+                    setTaskFormAttachments([]);
                     toggleModal('task', false);
                     showToast('השיעור תועד בהצלחה ביומן! ✨', 'success');
                 } else {
@@ -1553,9 +1642,11 @@ function App() {
                         createdAt: now.toISOString(),
                         completed: false,
                         givenDate: actualGivenDate,
-                        autoPenaltyApplied: false
+                        autoPenaltyApplied: false,
+                        attachments: attachments
                     };
                     updateUserData(prev => ({ ...prev, tasks: [newTask, ...prev.tasks] }));
+                    setTaskFormAttachments([]);
                     toggleModal('task', false);
                     showToast('המשימה נוספה בהצלחה!', 'success');
                 }
@@ -1787,6 +1878,7 @@ function App() {
                                 givenDate: givenDate,
                                 dueDate: newDueDate || t.dueDate || '',
                                 dueTime: newDueTime || t.dueTime || '',
+                                attachments: editTaskAttachments || t.attachments || [],
                             };
                             if (newStartTime) {
                                 updated.startTime = newStartTime;
@@ -1803,6 +1895,7 @@ function App() {
                 });
                 toggleModal('edit', false);
                 setEditingTask(null);
+                setEditTaskAttachments([]);
                 showToast('המשימה עודכנה בהצלחה! ✨', 'success');
             };
 
@@ -3859,6 +3952,16 @@ function App() {
                                                                         <span>💬</span> וואטסאפ
                                                                     </span>
                                                                 )}
+                                                                {task.attachments && task.attachments.length > 0 && (
+                                                                    <button 
+                                                                        type="button"
+                                                                        onClick={(e) => { e.stopPropagation(); openAttachmentViewer(task); }}
+                                                                        className="text-[10px] font-bold text-purple-700 bg-purple-100 hover:bg-purple-200 px-2 py-0.5 rounded-lg border border-purple-200 flex items-center gap-1 shadow-xs transition-colors cursor-pointer"
+                                                                        title="צפייה בצילומי לוח ודפי עבודה"
+                                                                    >
+                                                                        <span>📎</span> {task.attachments.length} קבצים
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                             <div className="flex items-center gap-1.5 flex-wrap">
                                                                 {countdown && (
@@ -4012,6 +4115,16 @@ function App() {
                                                                     סיבת איחור: {task.lateReason}
                                                                 </span>
                                                             )}
+                                                            {task.attachments && task.attachments.length > 0 && (
+                                                                <button 
+                                                                    type="button"
+                                                                    onClick={(e) => { e.stopPropagation(); openAttachmentViewer(task); }} 
+                                                                    className="text-xs font-bold text-purple-700 bg-purple-100 hover:bg-purple-200 px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1 shadow-xs transition-colors cursor-pointer"
+                                                                    title="צפייה בצילומי לוח ודפי עבודה"
+                                                                >
+                                                                    <span>📎</span> {task.attachments.length} קבצים
+                                                                </button>
+                                                            )}
                                                         </div>
                                                         <h3 className={`font-bold text-lg ${isTaskDone ? 'line-through text-stone-400' : 'text-stone-800'}`}>{task.title}</h3>
                                                         <div className="text-sm text-stone-500 mt-1 font-medium">{task.lessonTopic && `נושא: ${task.lessonTopic}`}</div>
@@ -4041,9 +4154,15 @@ function App() {
                                                                 </button>
                                                             </div>
                                                         ) : (
-                                                            <button onClick={() => handleDeleteTask(task.id)} className="w-full bg-stone-50 text-stone-500 border border-stone-200 p-2.5 rounded-xl hover:bg-rose-50 hover:text-rose-600 hover:border-rose-200 transition-colors flex items-center justify-center gap-2 text-sm font-medium active:scale-95">
-                                                                <IconTrash className="w-4 h-4"/> מחיקה מהרשימה
-                                                            </button>
+                                                            <div className="flex gap-2 w-full items-center">
+                                                                <button onClick={() => setTaskActionsMenu(task)} className="flex-1 px-3 py-2.5 bg-stone-50 hover:bg-stone-100 text-stone-600 border border-stone-200 rounded-xl transition-all font-bold text-sm flex items-center justify-center gap-1.5 active:scale-95 shadow-xs" title="אפשרויות משימה">
+                                                                    <span className="text-base font-black leading-none">⋯</span>
+                                                                    <span className="text-xs">אפשרויות</span>
+                                                                </button>
+                                                                <button onClick={() => handleDeleteTask(task.id)} className="px-3 py-2.5 bg-stone-50 text-stone-400 border border-stone-200 rounded-xl hover:bg-rose-50 hover:text-rose-600 hover:border-rose-200 transition-colors flex items-center justify-center text-sm font-medium active:scale-95" title="מחיקה מהרשימה">
+                                                                    <IconTrash className="w-4 h-4"/>
+                                                                </button>
+                                                            </div>
                                                         )}
                                                     </div>
                                                 </div>
@@ -4113,13 +4232,40 @@ function App() {
                                                                     (סומן ללא שיעורי בית)
                                                                 </span>
                                                             )}
+                                                            {task.attachments && task.attachments.length > 0 && (
+                                                                <button 
+                                                                    type="button"
+                                                                    onClick={() => openAttachmentViewer(task)} 
+                                                                    className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                                                    title="צפייה בצילומי לוח ודפי עבודה"
+                                                                >
+                                                                    <span>🖼️</span> צפייה בצילומי לוח ({task.attachments.length})
+                                                                </button>
+                                                            )}
                                                         </div>
                                                         <h3 className="font-bold text-lg text-stone-800">{task.lessonTopic}</h3>
                                                         {!task.isLessonLog && <div className="text-sm text-stone-500 mt-1">מתוך משימה: {task.title}</div>}
                                                     </div>
-                                                    <div className="flex gap-2 shrink-0 border-t md:border-t-0 md:border-r border-stone-100 pt-3 md:pt-0 md:pr-4">
-                                                        <button onClick={() => handleRemoveFromLessonLog(task.id)} className="bg-stone-50 text-stone-500 border border-stone-200 px-4 py-3 rounded-xl hover:bg-rose-50 hover:text-rose-600 hover:border-rose-200 transition-colors flex items-center justify-center gap-2 text-sm font-medium w-full md:w-auto active:scale-95">
-                                                            <IconTrash className="w-4 h-4"/> מחיקה מהיומן
+                                                    <div className="flex gap-2 shrink-0 border-t md:border-t-0 md:border-r border-stone-100 pt-3 md:pt-0 md:pr-4 items-center">
+                                                        <label className="bg-stone-50 text-stone-700 hover:text-purple-700 hover:bg-purple-50 border border-stone-200 hover:border-purple-200 px-3 py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-bold w-full md:w-auto active:scale-95 cursor-pointer shadow-xs" title="הוספת צילום לוח או דף עבודה לשיעור זה">
+                                                            <input 
+                                                                type="file" 
+                                                                multiple 
+                                                                accept="image/*,application/pdf" 
+                                                                className="hidden" 
+                                                                onChange={async (e) => {
+                                                                    const files = Array.from(e.target.files || []);
+                                                                    if (files.length === 0) return;
+                                                                    for (const f of files) {
+                                                                        await handleQuickAddAttachmentToTask(task, f);
+                                                                    }
+                                                                    e.target.value = '';
+                                                                }} 
+                                                            />
+                                                            <span>📷</span> צילום לוח
+                                                        </label>
+                                                        <button onClick={() => handleRemoveFromLessonLog(task.id)} className="bg-stone-50 text-stone-400 hover:text-rose-600 border border-stone-200 hover:border-rose-200 px-3 py-2.5 rounded-xl hover:bg-rose-50 transition-colors flex items-center justify-center gap-1.5 text-xs font-medium w-full md:w-auto active:scale-95" title="מחיקה מהיומן">
+                                                            <IconTrash className="w-4 h-4"/> מחיקה
                                                         </button>
                                                     </div>
                                                 </div>
@@ -5622,7 +5768,7 @@ function App() {
                                         <div className="w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center text-purple-600"><IconPlus className="w-4 h-4"/></div>
                                         הוספת שיעור / משימה
                                     </h3>
-                                    <button onClick={()=>toggleModal('task',false)} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full transition-colors active:scale-95"><IconX className="w-4 h-4"/></button>
+                                    <button onClick={()=>{ toggleModal('task',false); setTaskFormAttachments([]); }} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full transition-colors active:scale-95"><IconX className="w-4 h-4"/></button>
                                 </div>
                                 <form onSubmit={(e) => {
                                     e.preventDefault();
@@ -5760,6 +5906,60 @@ function App() {
                                         </div>
                                     )}
 
+                                    {/* צילומים וקבצים מצורפים */}
+                                    <div className="pt-2 border-t border-stone-100">
+                                        <div className="flex items-center justify-between mb-1.5">
+                                            <label className="text-xs font-bold text-stone-500 uppercase tracking-wide flex items-center gap-1.5">
+                                                <IconPaperclip className="w-3.5 h-3.5 text-purple-600"/>
+                                                צילומי לוח / דפי עבודה (תמונות ו-PDF)
+                                            </label>
+                                            {taskFormAttachments.length > 0 && (
+                                                <span className="text-[11px] font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">
+                                                    {taskFormAttachments.length} קבצים
+                                                </span>
+                                            )}
+                                        </div>
+                                        
+                                        <label className="flex items-center justify-center gap-2 p-3 border-2 border-dashed border-stone-200 hover:border-purple-300 rounded-2xl cursor-pointer bg-stone-50 hover:bg-purple-50/40 transition-all text-xs font-bold text-stone-600 active:scale-[0.99]">
+                                            <input 
+                                                type="file" 
+                                                multiple 
+                                                accept="image/*,application/pdf" 
+                                                className="hidden" 
+                                                onChange={(e) => handleFilesSelected(e, 'new')} 
+                                                disabled={isUploadingAttachment}
+                                            />
+                                            {isUploadingAttachment ? (
+                                                <span className="flex items-center gap-2 text-purple-600 animate-pulse">
+                                                    <span>מעבד קובץ... ⏳</span>
+                                                </span>
+                                            ) : (
+                                                <span className="flex items-center gap-2">
+                                                    <span className="text-base">📸</span>
+                                                    <span>העלאת תמונת לוח או קובץ PDF</span>
+                                                </span>
+                                            )}
+                                        </label>
+
+                                        {taskFormAttachments.length > 0 && (
+                                            <div className="mt-2 flex flex-wrap gap-2">
+                                                {taskFormAttachments.map((att, idx) => (
+                                                    <div key={att.id || idx} className="flex items-center gap-1.5 bg-purple-50 border border-purple-100 text-purple-800 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
+                                                        <span>{att.type === 'application/pdf' || att.name?.toLowerCase().endsWith('.pdf') ? '📄' : '🖼️'}</span>
+                                                        <span className="truncate max-w-[140px]" title={att.name}>{att.name}</span>
+                                                        <span className="text-[10px] text-stone-400">({Math.round((att.size || 0) / 1024)}KB)</span>
+                                                        <button 
+                                                            type="button" 
+                                                            onClick={() => setTaskFormAttachments(prev => prev.filter((_, i) => i !== idx))} 
+                                                            className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
 
                                     <button type="submit" className="w-full bg-stone-800 text-white rounded-2xl py-3.5 font-bold text-base shadow-md hover:bg-stone-900 transition-colors mt-2 active:scale-95">
                                         {taskFormHasHW ? 'שמירת משימה' : 'תיעוד שיעור'}
@@ -5814,6 +6014,61 @@ function App() {
                                             <input name="startTime" type="time" defaultValue={editingTask.startTime || ''} className="w-full p-3 bg-white border border-stone-200 rounded-2xl text-sm" />
                                         </div>
                                     )}
+                                    {/* צילומים וקבצים מצורפים בעריכה */}
+                                    <div className="pt-2 border-t border-stone-100">
+                                        <div className="flex items-center justify-between mb-1.5">
+                                            <label className="text-xs font-bold text-stone-500 uppercase tracking-wide flex items-center gap-1.5">
+                                                <IconPaperclip className="w-3.5 h-3.5 text-purple-600"/>
+                                                צילומי לוח / דפי עבודה (תמונות ו-PDF)
+                                            </label>
+                                            {editTaskAttachments.length > 0 && (
+                                                <span className="text-[11px] font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">
+                                                    {editTaskAttachments.length} קבצים
+                                                </span>
+                                            )}
+                                        </div>
+                                        
+                                        <label className="flex items-center justify-center gap-2 p-3 border-2 border-dashed border-stone-200 hover:border-purple-300 rounded-2xl cursor-pointer bg-stone-50 hover:bg-purple-50/40 transition-all text-xs font-bold text-stone-600 active:scale-[0.99]">
+                                            <input 
+                                                type="file" 
+                                                multiple 
+                                                accept="image/*,application/pdf" 
+                                                className="hidden" 
+                                                onChange={(e) => handleFilesSelected(e, 'edit')} 
+                                                disabled={isUploadingAttachment}
+                                            />
+                                            {isUploadingAttachment ? (
+                                                <span className="flex items-center gap-2 text-purple-600 animate-pulse">
+                                                    <span>מעבד קובץ... ⏳</span>
+                                                </span>
+                                            ) : (
+                                                <span className="flex items-center gap-2">
+                                                    <span className="text-base">📸</span>
+                                                    <span>הוספת צילום לוח או קובץ PDF</span>
+                                                </span>
+                                            )}
+                                        </label>
+
+                                        {editTaskAttachments.length > 0 && (
+                                            <div className="mt-2 flex flex-wrap gap-2">
+                                                {editTaskAttachments.map((att, idx) => (
+                                                    <div key={att.id || idx} className="flex items-center gap-1.5 bg-purple-50 border border-purple-100 text-purple-800 text-xs px-2.5 py-1.5 rounded-xl font-medium max-w-full">
+                                                        <span>{att.type === 'application/pdf' || att.name?.toLowerCase().endsWith('.pdf') ? '📄' : '🖼️'}</span>
+                                                        <span className="truncate max-w-[140px]" title={att.name}>{att.name}</span>
+                                                        <span className="text-[10px] text-stone-400">({Math.round((att.size || 0) / 1024)}KB)</span>
+                                                        <button 
+                                                            type="button" 
+                                                            onClick={() => setEditTaskAttachments(prev => prev.filter((_, i) => i !== idx))} 
+                                                            className="text-stone-400 hover:text-rose-500 mr-1 p-0.5"
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
                                     <button type="submit" className="w-full bg-stone-800 text-white rounded-2xl py-3.5 font-bold">שמירת עריכה</button>
                                 </form>
                             </div>
@@ -6738,6 +6993,43 @@ function App() {
                                     </div>
 
                                     <div className="space-y-2">
+                                        {task.attachments && task.attachments.length > 0 && (
+                                            <button 
+                                                onClick={() => {
+                                                    openAttachmentViewer(task);
+                                                    setTaskActionsMenu(null);
+                                                }}
+                                                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 transition-all font-bold text-sm active:scale-98 shadow-xs">
+                                                <div className="flex items-center gap-3">
+                                                    <span className="text-xl">🖼️</span>
+                                                    <span>צפייה בצילומי לוח ודפי עבודה ({task.attachments.length})</span>
+                                                </div>
+                                                <span className="text-purple-700 bg-purple-200/70 px-2.5 py-0.5 rounded-md text-[11px] font-bold">פתיחה ↗</span>
+                                            </button>
+                                        )}
+
+                                        <label className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-stone-50 hover:bg-purple-50 hover:text-purple-800 text-stone-700 border border-stone-200 hover:border-purple-200 transition-all font-bold text-sm active:scale-98 cursor-pointer">
+                                            <input 
+                                                type="file" 
+                                                multiple 
+                                                accept="image/*,application/pdf" 
+                                                className="hidden" 
+                                                onChange={async (e) => {
+                                                    const files = Array.from(e.target.files || []);
+                                                    if (files.length === 0) return;
+                                                    for (const f of files) {
+                                                        await handleQuickAddAttachmentToTask(task, f);
+                                                    }
+                                                    e.target.value = '';
+                                                    setTaskActionsMenu(null);
+                                                }} 
+                                            />
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xl">📎</span>
+                                                <span>הוספת צילום לוח / דף עבודה</span>
+                                            </div>
+                                            <span className="text-stone-400 text-xs">+ קובץ</span>
+                                        </label>
                                         <button 
                                             onClick={() => {
                                                 setEditingTask(task);
@@ -7004,6 +7296,196 @@ function App() {
                                             סגירה
                                         </button>
                                     </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+                    {viewingAttachment && (() => {
+                        const { task, attachments, activeIndex, currentDataUrl, loading } = viewingAttachment;
+                        const currentAtt = attachments[activeIndex] || attachments[0];
+                        if (!currentAtt) return null;
+
+                        const isPdf = currentAtt.type === 'application/pdf' || currentAtt.name?.toLowerCase().endsWith('.pdf');
+                        const total = attachments.length;
+
+                        const handleDeleteCurrentAttachment = async () => {
+                            if (!window.confirm(`האם למחוק את הקובץ "${currentAtt.name}" לצמיתות?`)) return;
+                            try {
+                                await window.FileStorage.deleteAttachment(currentAtt.id);
+                                const updatedAttachments = attachments.filter((_, i) => i !== activeIndex);
+                                updateUserData(prev => ({
+                                    ...prev,
+                                    tasks: prev.tasks.map(t => t.id === task.id ? { ...t, attachments: updatedAttachments } : t)
+                                }));
+                                if (updatedAttachments.length === 0) {
+                                    setViewingAttachment(null);
+                                } else {
+                                    const nextIdx = Math.max(0, activeIndex - 1);
+                                    switchAttachmentIndex(nextIdx);
+                                }
+                                showToast('הקובץ נמחק בהצלחה', 'info');
+                            } catch (e) {
+                                console.error('Delete attachment error:', e);
+                                showToast('שגיאה במחיקת הקובץ', 'error');
+                            }
+                        };
+
+                        return (
+                            <div className="fixed inset-0 z-[85] flex items-center justify-center p-2 sm:p-4 bg-stone-950/80 backdrop-blur-sm animate-[fadeIn_0.15s_ease-out]"
+                                 onClick={() => setViewingAttachment(null)}>
+                                <div className="bg-white rounded-3xl w-full max-w-4xl max-h-[95vh] shadow-2xl flex flex-col overflow-hidden border border-stone-200 animate-[scaleUp_0.15s_ease-out]"
+                                     onClick={(e) => e.stopPropagation()}>
+                                    
+                                    {/* Header */}
+                                    <div className="p-4 sm:p-5 border-b border-stone-100 flex items-center justify-between gap-3 bg-stone-50/70">
+                                        <div className="flex items-center gap-3 overflow-hidden">
+                                            <div className="w-10 h-10 rounded-2xl bg-purple-100 text-purple-700 flex items-center justify-center text-xl shrink-0">
+                                                {isPdf ? '📄' : '🖼️'}
+                                            </div>
+                                            <div className="overflow-hidden">
+                                                <div className="flex items-center gap-2">
+                                                    <h3 className="font-bold text-base sm:text-lg text-stone-800 truncate" title={currentAtt.name}>
+                                                        {currentAtt.name}
+                                                    </h3>
+                                                    {total > 1 && (
+                                                        <span className="text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full font-bold shrink-0">
+                                                            {activeIndex + 1} / {total}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="text-xs text-stone-400 truncate flex items-center gap-2">
+                                                    <span>{task.title}</span>
+                                                    <span>•</span>
+                                                    <span>{window.FileStorage?.formatFileSize(currentAtt.size) || ''}</span>
+                                                    {currentAtt.uploadedAt && (
+                                                        <>
+                                                            <span>•</span>
+                                                            <span dir="ltr">{new Date(currentAtt.uploadedAt).toLocaleDateString('he-IL')}</span>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2 shrink-0">
+                                            {currentDataUrl && (
+                                                <>
+                                                    <a 
+                                                        href={currentDataUrl} 
+                                                        download={currentAtt.name} 
+                                                        className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95" 
+                                                        title="הורדת קובץ למכשיר"
+                                                    >
+                                                        <span>⬇️</span>
+                                                        <span className="hidden sm:inline">הורדה</span>
+                                                    </a>
+                                                    <button 
+                                                        type="button" 
+                                                        onClick={() => {
+                                                            const w = window.open();
+                                                            if (w) {
+                                                                if (isPdf) {
+                                                                    w.document.write(`<iframe src="${currentDataUrl}" style="border:0; top:0; left:0; bottom:0; right:0; width:100%; height:100%;" allowfullscreen></iframe>`);
+                                                                } else {
+                                                                    w.document.write(`<img src="${currentDataUrl}" style="max-width:100%; height:auto; display:block; margin:auto;" />`);
+                                                                }
+                                                            }
+                                                        }}
+                                                        className="px-3 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95" 
+                                                        title="פתיחה בלשונית חדשה במסך מלא"
+                                                    >
+                                                        <span>↗️</span>
+                                                        <span className="hidden sm:inline">מסך מלא</span>
+                                                    </button>
+                                                </>
+                                            )}
+                                            <button 
+                                                type="button" 
+                                                onClick={handleDeleteCurrentAttachment}
+                                                className="p-2 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors active:scale-95" 
+                                                title="מחיקת קובץ זה מהמשימה"
+                                            >
+                                                <IconTrash className="w-4 h-4"/>
+                                            </button>
+                                            <button 
+                                                type="button" 
+                                                onClick={() => setViewingAttachment(null)}
+                                                className="p-2 bg-stone-100 hover:bg-stone-200 text-stone-500 rounded-full transition-colors active:scale-95"
+                                            >
+                                                <IconX className="w-4 h-4"/>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Content Body */}
+                                    <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-stone-100/50 min-h-[360px] max-h-[70vh]">
+                                        {loading ? (
+                                            <div className="flex flex-col items-center gap-3 text-stone-400 animate-pulse">
+                                                <div className="text-4xl animate-spin">⏳</div>
+                                                <div className="text-sm font-bold">טוען קובץ...</div>
+                                            </div>
+                                        ) : !currentDataUrl ? (
+                                            <div className="text-center p-8 text-stone-400">
+                                                <div className="text-3xl mb-2">⚠️</div>
+                                                <div className="font-bold text-stone-600">לא ניתן היה לטעון את תוכן הקובץ</div>
+                                                <div className="text-xs mt-1">ייתכן שהקובץ נשמר במכשיר אחר או שזיכרון הדפדפן נוקה.</div>
+                                            </div>
+                                        ) : isPdf ? (
+                                            <iframe 
+                                                src={currentDataUrl} 
+                                                title={currentAtt.name} 
+                                                className="w-full h-[65vh] rounded-2xl border border-stone-200 bg-white shadow-sm"
+                                            />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center p-2">
+                                                <img 
+                                                    src={currentDataUrl} 
+                                                    alt={currentAtt.name} 
+                                                    className="max-h-[65vh] max-w-full rounded-2xl object-contain shadow-lg border border-stone-200 bg-white"
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Footer / Navigation for multiple attachments */}
+                                    {total > 1 && (
+                                        <div className="p-3 border-t border-stone-100 bg-white flex items-center justify-between gap-3">
+                                            <button 
+                                                type="button" 
+                                                disabled={activeIndex === 0}
+                                                onClick={() => switchAttachmentIndex(activeIndex - 1)}
+                                                className="px-4 py-2 bg-stone-100 hover:bg-stone-200 disabled:opacity-30 disabled:pointer-events-none text-stone-700 rounded-xl text-xs font-bold transition-all active:scale-95"
+                                            >
+                                                ▶ הקודם
+                                            </button>
+
+                                            <div className="flex items-center gap-1.5 overflow-x-auto py-1 px-2 max-w-[60%] custom-scrollbar">
+                                                {attachments.map((att, i) => (
+                                                    <button 
+                                                        key={att.id || i}
+                                                        onClick={() => switchAttachmentIndex(i)}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all ${
+                                                            i === activeIndex 
+                                                                ? 'bg-purple-600 text-white shadow-sm' 
+                                                                : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                                                        }`}
+                                                    >
+                                                        {att.type === 'application/pdf' ? '📄' : '🖼️'} {i + 1}
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            <button 
+                                                type="button" 
+                                                disabled={activeIndex === total - 1}
+                                                onClick={() => switchAttachmentIndex(activeIndex + 1)}
+                                                className="px-4 py-2 bg-stone-100 hover:bg-stone-200 disabled:opacity-30 disabled:pointer-events-none text-stone-700 rounded-xl text-xs font-bold transition-all active:scale-95"
+                                            >
+                                                הבא ◀
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         );
