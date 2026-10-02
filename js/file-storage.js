@@ -207,8 +207,13 @@ const FileStorage = (() => {
     /**
      * Retrieve the full file dataUrl for viewing
      */
+    /**
+     * Retrieve the full file dataUrl for viewing or printing
+     */
     const loadAttachmentData = async (attachment) => {
-        if (!attachment || !attachment.id) return null;
+        if (!attachment) return null;
+        if (attachment.dataUrl) return attachment.dataUrl;
+        if (!attachment.id) return null;
 
         // 1. Try local IndexedDB first
         const local = await getFromIndexedDB(attachment.id);
@@ -237,6 +242,62 @@ const FileStorage = (() => {
     };
 
     /**
+     * Convert a PDF DataURL to an array of high-resolution image objects for print:
+     * [ { pageNumber: 1, totalPages: N, dataUrl: 'data:image/jpeg;base64,...' }, ... ]
+     */
+    const renderPdfToImages = async (pdfDataUrl) => {
+        if (!pdfDataUrl) return [];
+        if (typeof window === 'undefined' || !window.pdfjsLib) {
+            console.warn('pdfjsLib is not loaded in window');
+            return [];
+        }
+        try {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+            let pdfData;
+            const base64Index = pdfDataUrl.indexOf(';base64,');
+            if (base64Index !== -1) {
+                const base64 = pdfDataUrl.substring(base64Index + 8);
+                const binaryString = atob(base64);
+                const len = binaryString.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                pdfData = bytes;
+            } else {
+                pdfData = pdfDataUrl;
+            }
+
+            const loadingTask = window.pdfjsLib.getDocument({ data: pdfData });
+            const pdf = await loadingTask.promise;
+            const pages = [];
+
+            for (let num = 1; num <= pdf.numPages; num++) {
+                const page = await pdf.getPage(num);
+                // Scale 1.5 gives high resolution, suitable for crisp printouts
+                const viewport = page.getViewport({ scale: 1.5 });
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+                const imgDataUrl = canvas.toDataURL('image/jpeg', 0.90);
+                pages.push({
+                    pageNumber: num,
+                    totalPages: pdf.numPages,
+                    dataUrl: imgDataUrl
+                });
+            }
+            return pages;
+        } catch (err) {
+            console.error('Error rendering PDF to images:', err);
+            return [];
+        }
+    };
+
+    /**
      * Delete an attachment from both IndexedDB and Firestore
      */
     const deleteAttachment = async (id) => {
@@ -261,7 +322,8 @@ const FileStorage = (() => {
         processAndSaveFile,
         loadAttachmentData,
         deleteAttachment,
-        formatFileSize
+        formatFileSize,
+        renderPdfToImages
     };
 })();
 

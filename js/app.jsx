@@ -2377,43 +2377,47 @@ function App() {
                     const needLessonBoard = mode === 'all' || mode === 'lessons' || (mode === 'custom' && curCustom.lessonsWithBoard);
                     const needHomeworkFiles = mode === 'all' || mode === 'homework' || (mode === 'custom' && curCustom.homeworkWithFiles);
 
-                    // Load board attachments with dataUrls if needed
+                    // Helper to enrich attachments with dataUrl and rendered PDF page images
+                    const enrichAttachmentList = async (attList) => {
+                        return Promise.all(attList.map(async (att) => {
+                            try {
+                                let dataUrl = att.dataUrl;
+                                if (!dataUrl && window.FileStorage && window.FileStorage.loadAttachmentData) {
+                                    dataUrl = await window.FileStorage.loadAttachmentData(att);
+                                }
+                                let pdfPages = [];
+                                const isPdf = att.type === 'application/pdf' || 
+                                              (att.name && att.name.toLowerCase().endsWith('.pdf')) || 
+                                              (dataUrl && dataUrl.startsWith('data:application/pdf'));
+                                
+                                if (isPdf && dataUrl && window.FileStorage && window.FileStorage.renderPdfToImages) {
+                                    pdfPages = await window.FileStorage.renderPdfToImages(dataUrl);
+                                }
+                                return { ...att, dataUrl: dataUrl || att.dataUrl, pdfPages };
+                            } catch (e) {
+                                console.warn('Could not enrich attachment for print:', att.name, e);
+                                return att;
+                            }
+                        }));
+                    };
+
+                    // Load board attachments with dataUrls and pdfPages if needed
                     const enrichedLessons = await Promise.all(lessonTasks.map(async (task) => {
                         const boardAtts = (task.attachments || []).filter(a => a.category === 'board' || (!a.category && task.isLessonLog));
                         if (!needLessonBoard || boardAtts.length === 0) {
                             return { ...task, loadedBoardAttachments: [] };
                         }
-                        const loaded = await Promise.all(boardAtts.map(async (att) => {
-                            try {
-                                if (window.FileStorage && window.FileStorage.loadAttachmentData) {
-                                    const dataUrl = await window.FileStorage.loadAttachmentData(att);
-                                    return { ...att, dataUrl };
-                                }
-                            } catch (e) {
-                                console.warn('Could not load board attachment for print', e);
-                            }
-                            return att;
-                        }));
+                        const loaded = await enrichAttachmentList(boardAtts);
                         return { ...task, loadedBoardAttachments: loaded };
                     }));
 
-                    // Load homework attachments with dataUrls if needed
+                    // Load homework attachments with dataUrls and pdfPages if needed
                     const enrichedHomework = await Promise.all(homeworkTasks.map(async (task) => {
                         const hwAtts = (task.attachments || []).filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
                         if (!needHomeworkFiles || hwAtts.length === 0) {
                             return { ...task, loadedHwAttachments: [] };
                         }
-                        const loaded = await Promise.all(hwAtts.map(async (att) => {
-                            try {
-                                if (window.FileStorage && window.FileStorage.loadAttachmentData) {
-                                    const dataUrl = await window.FileStorage.loadAttachmentData(att);
-                                    return { ...att, dataUrl };
-                                }
-                            } catch (e) {
-                                console.warn('Could not load hw attachment for print', e);
-                            }
-                            return att;
-                        }));
+                        const loaded = await enrichAttachmentList(hwAtts);
                         return { ...task, loadedHwAttachments: loaded };
                     }));
 
@@ -2481,11 +2485,31 @@ function App() {
                     setExamPrintModal(null);
                     setPrintType('exam');
                     setPrintMode(true);
-                    setTimeout(() => {
-                        window.print();
-                        setPrintMode(false);
-                        setPrintType(null);
-                    }, 650);
+
+                    // Wait for React to render #print-area and all images to load before calling window.print()
+                    setTimeout(async () => {
+                        try {
+                            const printArea = document.getElementById('print-area');
+                            if (printArea) {
+                                const imgs = Array.from(printArea.querySelectorAll('img'));
+                                await Promise.all(imgs.map(img => {
+                                    if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
+                                    return new Promise(resolve => {
+                                        img.onload = () => resolve();
+                                        img.onerror = () => resolve();
+                                        setTimeout(resolve, 2500);
+                                    });
+                                }));
+                            }
+                        } catch(e) {}
+
+                        // Small buffer to guarantee layout paint
+                        setTimeout(() => {
+                            window.print();
+                            setPrintMode(false);
+                            setPrintType(null);
+                        }, 300);
+                    }, 400);
                 } catch (err) {
                     console.error('Error preparing print:', err);
                     showToast('אירעה שגיאה בהכנת מסמך ההדפסה', 'error');
@@ -2899,29 +2923,79 @@ function App() {
                                                             <p className="text-xs text-stone-700 mb-2 bg-white p-2 rounded border border-stone-100 whitespace-pre-wrap">{task.notes}</p>
                                                         )}
                                                         {photos.length > 0 ? (
-                                                            <div className="mt-2">
-                                                                <div className="text-[11px] font-bold text-purple-800 mb-1.5">צילומי לוח מהשיעור ({photos.length}):</div>
-                                                                <div className={`grid ${photos.length === 1 ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
-                                                                    {photos.map((p, pIdx) => {
-                                                                        const isImg = p.dataUrl && (p.dataUrl.startsWith('data:image/') || p.type?.startsWith('image/'));
+                                                            <div className="mt-3 space-y-3">
+                                                                <div className="text-xs font-bold text-purple-900 flex items-center gap-1.5">
+                                                                    <span>📸</span> צילומי לוח ומסמכים מהשיעור ({photos.length}):
+                                                                </div>
+                                                                {photos.map((p, pIdx) => {
+                                                                    if (p.pdfPages && p.pdfPages.length > 0) {
                                                                         return (
-                                                                            <div key={p.id || pIdx} className="border border-stone-300 rounded-lg p-2 bg-white text-center break-inside-avoid">
-                                                                                {isImg ? (
-                                                                                    <img 
-                                                                                        src={p.dataUrl} 
-                                                                                        alt={p.name || 'צילום לוח'} 
-                                                                                        className="max-h-72 w-auto max-w-full mx-auto object-contain rounded" 
-                                                                                    />
-                                                                                ) : (
-                                                                                    <div className="p-3 text-xs text-stone-700 bg-stone-50 rounded font-medium">
-                                                                                        📄 מסמך מצורף: {p.name}
+                                                                            <div key={p.id || pIdx} className="space-y-4 my-2">
+                                                                                {p.pdfPages.map(page => (
+                                                                                    <div key={page.pageNumber} className="border-2 border-purple-200 rounded-2xl p-4 bg-white text-center break-inside-avoid shadow-xs">
+                                                                                        <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                            <span className="flex items-center gap-2 text-purple-950 font-black text-sm">
+                                                                                                <span>📄</span> {p.name}
+                                                                                            </span>
+                                                                                            <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                                עמוד {page.pageNumber} מתוך {page.totalPages}
+                                                                                            </span>
+                                                                                        </div>
+                                                                                        <img 
+                                                                                            src={page.dataUrl} 
+                                                                                            alt={`${p.name} - עמוד ${page.pageNumber}`} 
+                                                                                            className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
+                                                                                        />
                                                                                     </div>
-                                                                                )}
-                                                                                {p.name && <div className="text-[10px] text-stone-500 mt-1 font-mono">{p.name}</div>}
+                                                                                ))}
                                                                             </div>
                                                                         );
-                                                                    })}
-                                                                </div>
+                                                                    }
+
+                                                                    const isImg = p.dataUrl && (p.dataUrl.startsWith('data:image/') || p.type?.startsWith('image/'));
+                                                                    if (isImg) {
+                                                                        return (
+                                                                            <div key={p.id || pIdx} className="border-2 border-purple-200 rounded-2xl p-4 bg-white text-center break-inside-avoid my-2 shadow-xs">
+                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                    <span className="flex items-center gap-2 text-purple-950 font-black text-sm">
+                                                                                        <span>📸</span> {p.name || 'צילום לוח'}
+                                                                                    </span>
+                                                                                    <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                        צילום לוח מהשיעור
+                                                                                    </span>
+                                                                                </div>
+                                                                                <img 
+                                                                                    src={p.dataUrl} 
+                                                                                    alt={p.name || 'צילום לוח'} 
+                                                                                    className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
+                                                                                />
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    if (p.dataUrl && p.dataUrl.startsWith('data:application/pdf')) {
+                                                                        return (
+                                                                            <div key={p.id || pIdx} className="border-2 border-purple-200 rounded-2xl p-4 bg-white break-inside-avoid my-2 shadow-xs">
+                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                    <span className="flex items-center gap-2 text-purple-950 font-black text-sm">
+                                                                                        <span>📄</span> {p.name}
+                                                                                    </span>
+                                                                                    <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                        מסמך PDF
+                                                                                    </span>
+                                                                                </div>
+                                                                                <iframe src={p.dataUrl} title={p.name} className="w-full h-[650px] rounded-lg border border-stone-200"></iframe>
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    return (
+                                                                        <div key={p.id || pIdx} className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200 my-2 flex items-center justify-between">
+                                                                            <span>⚠️ לא ניתן היה לטעון את תוכן הקובץ ({p.name})</span>
+                                                                            <span className="text-[11px] text-stone-500 font-mono">{p.name}</span>
+                                                                        </div>
+                                                                    );
+                                                                })}
                                                             </div>
                                                         ) : (
                                                             <div className="text-[11px] text-stone-400 italic">לא צורף צילום לוח לשיעור זה</div>
@@ -2978,29 +3052,79 @@ function App() {
                                                             </div>
                                                         )}
                                                         {files.length > 0 ? (
-                                                            <div className="mt-2">
-                                                                <div className="text-[11px] font-bold text-indigo-800 mb-1.5">קובצי שיעורי בית ודפי עבודה ({files.length}):</div>
-                                                                <div className={`grid ${files.length === 1 ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
-                                                                    {files.map((f, fIdx) => {
-                                                                        const isImg = f.dataUrl && (f.dataUrl.startsWith('data:image/') || f.type?.startsWith('image/'));
+                                                            <div className="mt-3 space-y-3">
+                                                                <div className="text-xs font-bold text-indigo-900 flex items-center gap-1.5">
+                                                                    <span>📄</span> קובצי שיעורי בית ודפי עבודה ({files.length}):
+                                                                </div>
+                                                                {files.map((f, fIdx) => {
+                                                                    if (f.pdfPages && f.pdfPages.length > 0) {
                                                                         return (
-                                                                            <div key={f.id || fIdx} className="border border-stone-300 rounded-lg p-2 bg-white text-center break-inside-avoid">
-                                                                                {isImg ? (
-                                                                                    <img 
-                                                                                        src={f.dataUrl} 
-                                                                                        alt={f.name || 'דף עבודה'} 
-                                                                                        className="max-h-72 w-auto max-w-full mx-auto object-contain rounded" 
-                                                                                    />
-                                                                                ) : (
-                                                                                    <div className="p-3 text-xs text-stone-700 bg-stone-50 rounded font-medium">
-                                                                                        📄 מסמך מצורף: {f.name}
+                                                                            <div key={f.id || fIdx} className="space-y-4 my-2">
+                                                                                {f.pdfPages.map(page => (
+                                                                                    <div key={page.pageNumber} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid shadow-xs">
+                                                                                        <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                            <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
+                                                                                                <span>📄</span> {f.name}
+                                                                                            </span>
+                                                                                            <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                                עמוד {page.pageNumber} מתוך {page.totalPages}
+                                                                                            </span>
+                                                                                        </div>
+                                                                                        <img 
+                                                                                            src={page.dataUrl} 
+                                                                                            alt={`${f.name} - עמוד ${page.pageNumber}`} 
+                                                                                            className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
+                                                                                        />
                                                                                     </div>
-                                                                                )}
-                                                                                {f.name && <div className="text-[10px] text-stone-500 mt-1 font-mono">{f.name}</div>}
+                                                                                ))}
                                                                             </div>
                                                                         );
-                                                                    })}
-                                                                </div>
+                                                                    }
+
+                                                                    const isImg = f.dataUrl && (f.dataUrl.startsWith('data:image/') || f.type?.startsWith('image/'));
+                                                                    if (isImg) {
+                                                                        return (
+                                                                            <div key={f.id || fIdx} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid my-2 shadow-xs">
+                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                    <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
+                                                                                        <span>📄</span> {f.name || 'דף עבודה / תרגילים'}
+                                                                                    </span>
+                                                                                    <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                        תמונת דף עבודה
+                                                                                    </span>
+                                                                                </div>
+                                                                                <img 
+                                                                                    src={f.dataUrl} 
+                                                                                    alt={f.name || 'דף עבודה'} 
+                                                                                    className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
+                                                                                />
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    if (f.dataUrl && f.dataUrl.startsWith('data:application/pdf')) {
+                                                                        return (
+                                                                            <div key={f.id || fIdx} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white break-inside-avoid my-2 shadow-xs">
+                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
+                                                                                    <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
+                                                                                        <span>📄</span> {f.name}
+                                                                                    </span>
+                                                                                    <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
+                                                                                        מסמך PDF
+                                                                                    </span>
+                                                                                </div>
+                                                                                <iframe src={f.dataUrl} title={f.name} className="w-full h-[650px] rounded-lg border border-stone-200"></iframe>
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    return (
+                                                                        <div key={f.id || fIdx} className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200 my-2 flex items-center justify-between">
+                                                                            <span>⚠️ לא ניתן היה לטעון את תוכן הקובץ ({f.name})</span>
+                                                                            <span className="text-[11px] text-stone-500 font-mono">{f.name}</span>
+                                                                        </div>
+                                                                    );
+                                                                })}
                                                             </div>
                                                         ) : null}
                                                     </div>
