@@ -1181,26 +1181,44 @@ function App() {
                     }
                 }
                 const activeIndex = Math.min(initialIndex, attachments.length - 1);
+                const currentAtt = attachments[activeIndex];
                 setViewingAttachment({
                     task,
                     attachments,
                     activeIndex,
                     currentDataUrl: null,
+                    pdfPages: [],
                     loading: true
                 });
-                const dataUrl = await window.FileStorage.loadAttachmentData(attachments[activeIndex]);
+                const dataUrl = await window.FileStorage.loadAttachmentData(currentAtt);
+                let pdfPages = [];
+                const isPdf = currentAtt && ((currentAtt.type && /pdf/i.test(currentAtt.type)) || (currentAtt.name && /\.pdf$/i.test(currentAtt.name.trim())) || (dataUrl && /data:application\/(x-)?pdf/i.test(dataUrl)));
+                if (isPdf && dataUrl && window.FileStorage && window.FileStorage.renderPdfToImages) {
+                    try {
+                        pdfPages = await window.FileStorage.renderPdfToImages(dataUrl);
+                    } catch(e) {}
+                }
                 setViewingAttachment(prev => prev ? {
                     ...prev,
                     currentDataUrl: dataUrl,
+                    pdfPages,
                     loading: false
                 } : null);
             };
 
             const switchAttachmentIndex = async (newIndex) => {
                 if (!viewingAttachment || !viewingAttachment.attachments[newIndex]) return;
-                setViewingAttachment(prev => ({ ...prev, activeIndex: newIndex, currentDataUrl: null, loading: true }));
-                const dataUrl = await window.FileStorage.loadAttachmentData(viewingAttachment.attachments[newIndex]);
-                setViewingAttachment(prev => prev ? { ...prev, currentDataUrl: dataUrl, loading: false } : null);
+                const nextAtt = viewingAttachment.attachments[newIndex];
+                setViewingAttachment(prev => ({ ...prev, activeIndex: newIndex, currentDataUrl: null, pdfPages: [], loading: true }));
+                const dataUrl = await window.FileStorage.loadAttachmentData(nextAtt);
+                let pdfPages = [];
+                const isPdf = nextAtt && ((nextAtt.type && /pdf/i.test(nextAtt.type)) || (nextAtt.name && /\.pdf$/i.test(nextAtt.name.trim())) || (dataUrl && /data:application\/(x-)?pdf/i.test(dataUrl)));
+                if (isPdf && dataUrl && window.FileStorage && window.FileStorage.renderPdfToImages) {
+                    try {
+                        pdfPages = await window.FileStorage.renderPdfToImages(dataUrl);
+                    } catch(e) {}
+                }
+                setViewingAttachment(prev => prev ? { ...prev, currentDataUrl: dataUrl, pdfPages, loading: false } : null);
             };
             const [activeFriend, setActiveFriend] = useState(null);
             const [editingSubject, setEditingSubject] = useState(null);
@@ -2276,20 +2294,11 @@ function App() {
                 }
                 setExamPrintModal({
                     subjectId,
-                    mode: 'all',
-                    customSections: {
-                        summary: true,
-                        syllabus: true,
-                        lessonsWithBoard: true,
-                        homeworkWithFiles: true,
-                        weaknesses: true,
-                        exams: true,
-                        checklist: true
-                    }
+                    mode: 'regular'
                 });
             };
 
-            const prepareAndPrintExam = async (subjectId, mode = 'all', customSections = null) => {
+            const prepareAndPrintExam = async (subjectId, mode = 'regular') => {
                 if (!subjectId) {
                     showToast('יש לבחור מקצוע מהרשימה', 'warning');
                     return;
@@ -2370,59 +2379,30 @@ function App() {
                         return dateB.localeCompare(dateA);
                     });
 
-                    // Determine what attachments need to be loaded
-                    const defaultCustom = { summary: true, syllabus: true, lessonsWithBoard: true, homeworkWithFiles: true, weaknesses: true, exams: true, checklist: true };
-                    const curCustom = customSections || defaultCustom;
+                    const needLessonBoard = mode === 'all' || mode === 'lessons';
 
-                    const needLessonBoard = mode === 'all' || mode === 'lessons' || (mode === 'custom' && curCustom.lessonsWithBoard);
-                    const needHomeworkFiles = mode === 'all' || mode === 'homework' || (mode === 'custom' && curCustom.homeworkWithFiles);
-
-                    // Helper to enrich attachments with dataUrl and rendered PDF page images
-                    const enrichAttachmentList = async (attList) => {
-                        return Promise.all(attList.map(async (att) => {
+                    // Load board attachments (photos) only if needed
+                    const enrichedLessons = await Promise.all(lessonTasks.map(async (task) => {
+                        if (!needLessonBoard) {
+                            return { ...task, loadedBoardAttachments: [] };
+                        }
+                        const boardAtts = (task.attachments || []).filter(a => a.category === 'board' || (!a.category && task.isLessonLog));
+                        if (boardAtts.length === 0) {
+                            return { ...task, loadedBoardAttachments: [] };
+                        }
+                        const loaded = await Promise.all(boardAtts.map(async (att) => {
                             try {
                                 let dataUrl = att.dataUrl;
                                 if (!dataUrl && window.FileStorage && window.FileStorage.loadAttachmentData) {
                                     dataUrl = await window.FileStorage.loadAttachmentData(att);
                                 }
-                                let pdfPages = [];
-                                const isPdf = (att.type && /pdf/i.test(att.type)) || 
-                                              (att.name && /\.pdf$/i.test(att.name.trim())) || 
-                                              (dataUrl && /data:application\/(x-)?pdf/i.test(dataUrl));
-                                
-                                if (isPdf && dataUrl && window.FileStorage && window.FileStorage.renderPdfToImages) {
-                                    pdfPages = await window.FileStorage.renderPdfToImages(dataUrl);
-                                }
-                                return { ...att, dataUrl: dataUrl || att.dataUrl, pdfPages };
+                                return { ...att, dataUrl: dataUrl || att.dataUrl };
                             } catch (e) {
-                                console.warn('Could not enrich attachment for print:', att.name, e);
+                                console.warn('Could not load board photo for print:', att.name, e);
                                 return att;
                             }
                         }));
-                    };
-
-                    // Load board and homework attachments with dataUrls and pdfPages for lessons if needed
-                    const enrichedLessons = await Promise.all(lessonTasks.map(async (task) => {
-                        const boardAtts = (task.attachments || []).filter(a => a.category === 'board' || (!a.category && task.isLessonLog));
-                        const hwAtts = (task.attachments || []).filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
-
-                        const loadedBoard = (needLessonBoard && boardAtts.length > 0) ? await enrichAttachmentList(boardAtts) : [];
-                        const loadedHw = (needHomeworkFiles && hwAtts.length > 0) ? await enrichAttachmentList(hwAtts) : [];
-
-                        return { ...task, loadedBoardAttachments: loadedBoard, loadedHwAttachments: loadedHw };
-                    }));
-
-                    // Load homework attachments with dataUrls and pdfPages if needed
-                    const enrichedHomework = await Promise.all(homeworkTasks.map(async (task) => {
-                        let hwAtts = (task.attachments || []).filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
-                        if (hwAtts.length === 0 && task.attachments && task.attachments.length > 0 && !task.isLessonLog) {
-                            hwAtts = task.attachments.filter(a => a.category !== 'board');
-                        }
-                        if (!needHomeworkFiles || hwAtts.length === 0) {
-                            return { ...task, loadedHwAttachments: [] };
-                        }
-                        const loaded = await enrichAttachmentList(hwAtts);
-                        return { ...task, loadedHwAttachments: loaded };
+                        return { ...task, loadedBoardAttachments: loaded };
                     }));
 
                     // 4. Weaknesses and difficulties (understanding <= 3)
@@ -2454,19 +2434,18 @@ function App() {
                     const ratedTasks = homeworkTasks.filter(t => t.completed && t.understandingRating);
                     const avgUnderstanding = ratedTasks.length > 0 
                         ? (ratedTasks.reduce((sum, t) => sum + Number(t.understandingRating), 0) / ratedTasks.length).toFixed(1)
-                        : null;
+                    : null;
 
                     const printModeConfig = {
                         mode,
                         needLessonBoard,
-                        needHomeworkFiles,
-                        includeSummary: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.summary),
-                        includeSyllabus: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.syllabus),
-                        includeLessonBoard: needLessonBoard || mode === 'text_only',
-                        includeHomeworkFiles: needHomeworkFiles || mode === 'text_only',
-                        includeWeaknesses: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.weaknesses),
-                        includeExams: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.exams),
-                        includeChecklist: mode === 'all' || mode === 'text_only' || (mode === 'custom' && curCustom.checklist)
+                        includeSummary: mode === 'all' || mode === 'regular',
+                        includeSyllabus: mode === 'all' || mode === 'regular',
+                        includeLessonBoard: true,
+                        includeHomework: mode === 'all' || mode === 'regular',
+                        includeWeaknesses: mode === 'all' || mode === 'regular',
+                        includeExams: mode === 'all' || mode === 'regular',
+                        includeChecklist: mode === 'all' || mode === 'regular'
                     };
 
                     setExamPlanData({
@@ -2476,7 +2455,6 @@ function App() {
                         allTopicsList,
                         homeworkTasks,
                         lessonTasks: enrichedLessons,
-                        homeworkTasksEnriched: enrichedHomework,
                         weakTasks,
                         hardEx,
                         givenUpTasks,
@@ -2837,16 +2815,14 @@ function App() {
                                 </div>
                                 <h1 className="text-2xl md:text-3xl font-black text-stone-900 mb-1">
                                     {printModeConfig?.mode === 'lessons' ? `📸 יומן שיעורים וצילומי לוח: ${subjectName}` :
-                                     printModeConfig?.mode === 'homework' ? `📄 שיעורי בית ודפי עבודה: ${subjectName}` :
-                                     printModeConfig?.mode === 'text_only' ? `📝 חוברת סיכום והכנה לבחינה: ${subjectName}` :
-                                     `חוברת הכנה מקיפה למבחן: ${subjectName}`}
+                                     printModeConfig?.mode === 'regular' ? `📝 חוברת סיכום והכנה לבחינה: ${subjectName}` :
+                                     `🌟 חוברת הכנה מקיפה למבחן: ${subjectName}`}
                                 </h1>
                                 <p className="text-sm font-bold text-stone-600">
                                     תלמידה: {activeUserData.name} • {
-                                        printModeConfig?.mode === 'lessons' ? 'ריכוז שיעורים וצילומי לוח מהכיתה' :
-                                        printModeConfig?.mode === 'homework' ? 'ריכוז שיעורי בית, דפי עבודה ותרגילים' :
-                                        printModeConfig?.mode === 'text_only' ? 'חוברת סיכום טקסטואלית מרוכזת (ללא קבצים)' :
-                                        'תיק למידה מרוכז לקראת הבחינה'
+                                        printModeConfig?.mode === 'lessons' ? 'יומן שיעורים וצילומי לוח מהכיתה' :
+                                        printModeConfig?.mode === 'regular' ? 'חוברת סיכום והכנה מרוכזת (טקסט וסיכום)' :
+                                        'חוברת הכנה מקיפה כולל צילומי לוח'
                                     }
                                 </p>
                             </div>
@@ -2907,8 +2883,14 @@ function App() {
                             {printModeConfig?.includeLessonBoard && (
                                 <div className="mb-6">
                                     <h2 className="text-base font-bold bg-purple-50 text-purple-900 p-2.5 mb-3 rounded-lg border border-purple-200 flex items-center justify-between">
-                                        <span>📸 יומן שיעורים וצילומי לוח מהכיתה ({lessonTasks.length})</span>
-                                        <span className="text-xs font-normal text-purple-700">כותרות שיעורים וצילומי הלוח</span>
+                                        <span>
+                                            {printModeConfig?.needLessonBoard 
+                                                ? `📸 יומן שיעורים וצילומי לוח מהכיתה (${lessonTasks.length})` 
+                                                : `📖 יומן שיעורים ונושאים (${lessonTasks.length})`}
+                                        </span>
+                                        <span className="text-xs font-normal text-purple-700">
+                                            {printModeConfig?.needLessonBoard ? 'כותרות שיעורים וצילומי הלוח' : 'כותרות השיעורים והערות'}
+                                        </span>
                                     </h2>
                                     {lessonTasks.length > 0 ? (
                                         <div className="space-y-4">
@@ -2930,36 +2912,12 @@ function App() {
                                                         {task.notes && (
                                                             <p className="text-xs text-stone-700 mb-2 bg-white p-2 rounded border border-stone-100 whitespace-pre-wrap">{task.notes}</p>
                                                         )}
-                                                        {photos.length > 0 ? (
+                                                        {printModeConfig?.needLessonBoard && photos.length > 0 && (
                                                             <div className="mt-3 space-y-3">
                                                                 <div className="text-xs font-bold text-purple-900 flex items-center gap-1.5">
-                                                                    <span>📸</span> צילומי לוח ומסמכים מהשיעור ({photos.length}):
+                                                                    <span>📸</span> צילומי לוח מהשיעור ({photos.length}):
                                                                 </div>
                                                                 {photos.map((p, pIdx) => {
-                                                                    if (p.pdfPages && p.pdfPages.length > 0) {
-                                                                        return (
-                                                                            <div key={p.id || pIdx} className="space-y-4 my-2">
-                                                                                {p.pdfPages.map(page => (
-                                                                                    <div key={page.pageNumber} className="border-2 border-purple-200 rounded-2xl p-4 bg-white text-center break-inside-avoid shadow-xs">
-                                                                                        <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
-                                                                                            <span className="flex items-center gap-2 text-purple-950 font-black text-sm">
-                                                                                                <span>📄</span> {p.name}
-                                                                                            </span>
-                                                                                            <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-xs font-bold">
-                                                                                                עמוד {page.pageNumber} מתוך {page.totalPages}
-                                                                                            </span>
-                                                                                        </div>
-                                                                                        <img 
-                                                                                            src={page.dataUrl} 
-                                                                                            alt={`${p.name} - עמוד ${page.pageNumber}`} 
-                                                                                            className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
-                                                                                        />
-                                                                                    </div>
-                                                                                ))}
-                                                                            </div>
-                                                                        );
-                                                                    }
-
                                                                     const isImg = p.dataUrl && (p.dataUrl.startsWith('data:image/') || p.type?.startsWith('image/'));
                                                                     if (isImg) {
                                                                         return (
@@ -2980,87 +2938,6 @@ function App() {
                                                                             </div>
                                                                         );
                                                                     }
-
-                                                                    if (p.dataUrl && p.dataUrl.startsWith('data:application/pdf')) {
-                                                                        return (
-                                                                            <div key={p.id || pIdx} className="border-2 border-purple-200 rounded-2xl p-4 bg-white break-inside-avoid my-2 shadow-xs">
-                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
-                                                                                    <span className="flex items-center gap-2 text-purple-950 font-black text-sm">
-                                                                                        <span>📄</span> {p.name}
-                                                                                    </span>
-                                                                                    <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-xs font-bold">
-                                                                                        מסמך PDF
-                                                                                    </span>
-                                                                                </div>
-                                                                                <iframe src={p.dataUrl} title={p.name} className="w-full h-[650px] rounded-lg border border-stone-200"></iframe>
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    return (
-                                                                        <div key={p.id || pIdx} className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200 my-2 flex items-center justify-between">
-                                                                            <span>⚠️ לא ניתן היה לטעון את תוכן הקובץ ({p.name})</span>
-                                                                            <span className="text-[11px] text-stone-500 font-mono">{p.name}</span>
-                                                                        </div>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                        ) : (
-                                                            printModeConfig?.needLessonBoard ? (
-                                                                <div className="text-[11px] text-stone-400 italic">לא צורף צילום לוח לשיעור זה</div>
-                                                            ) : null
-                                                        )}
-                                                        {task.loadedHwAttachments && task.loadedHwAttachments.length > 0 && printModeConfig?.needHomeworkFiles && (
-                                                            <div className="mt-3 space-y-3 pt-3 border-t border-stone-200">
-                                                                <div className="text-xs font-bold text-indigo-900 flex items-center gap-1.5">
-                                                                    <span>📄</span> דפי עבודה ושיעורי בית מהשיעור ({task.loadedHwAttachments.length}):
-                                                                </div>
-                                                                {task.loadedHwAttachments.map((f, fIdx) => {
-                                                                    if (f.pdfPages && f.pdfPages.length > 0) {
-                                                                        return (
-                                                                            <div key={f.id || fIdx} className="space-y-4 my-2">
-                                                                                {f.pdfPages.map(page => (
-                                                                                    <div key={page.pageNumber} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid shadow-xs">
-                                                                                        <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
-                                                                                            <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
-                                                                                                <span>📄</span> {f.name}
-                                                                                            </span>
-                                                                                            <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
-                                                                                                עמוד {page.pageNumber} מתוך {page.totalPages}
-                                                                                            </span>
-                                                                                        </div>
-                                                                                        <img 
-                                                                                            src={page.dataUrl} 
-                                                                                            alt={`${f.name} - עמוד ${page.pageNumber}`} 
-                                                                                            className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
-                                                                                        />
-                                                                                    </div>
-                                                                                ))}
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    const isImg = f.dataUrl && (f.dataUrl.startsWith('data:image/') || f.type?.startsWith('image/'));
-                                                                    if (isImg) {
-                                                                        return (
-                                                                            <div key={f.id || fIdx} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid my-2 shadow-xs">
-                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
-                                                                                    <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
-                                                                                        <span>📄</span> {f.name || 'דף עבודה / תרגילים'}
-                                                                                    </span>
-                                                                                    <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
-                                                                                        תמונת דף עבודה
-                                                                                    </span>
-                                                                                </div>
-                                                                                <img 
-                                                                                    src={f.dataUrl} 
-                                                                                    alt={f.name || 'דף עבודה'} 
-                                                                                    className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
-                                                                                />
-                                                                            </div>
-                                                                        );
-                                                                    }
-
                                                                     return null;
                                                                 })}
                                                             </div>
@@ -3077,124 +2954,48 @@ function App() {
                                 </div>
                             )}
 
-                            {/* Section 3: Homework Tasks & Worksheets */}
-                            {printModeConfig?.includeHomeworkFiles && (
+                            {/* Section 3: Homework Tasks List (no files or pdfs) */}
+                            {printModeConfig?.includeHomework && (
                                 <div className="mb-6">
                                     <h2 className="text-base font-bold bg-indigo-50 text-indigo-900 p-2.5 mb-3 rounded-lg border border-indigo-200 flex items-center justify-between">
-                                        <span>📄 שיעורי בית, דפי עבודה ותרגילים ({homeworkTasksEnriched.length})</span>
-                                        <span className="text-xs font-normal text-indigo-700">פירוט המטלות ודפי העבודה</span>
+                                        <span>📝 שיעורי בית ומטלות לתרגול ({homeworkTasks.length})</span>
+                                        <span className="text-xs font-normal text-indigo-700">פירוט המטלות ומעקב הבנה</span>
                                     </h2>
-                                    {homeworkTasksEnriched.length > 0 ? (
-                                        <div className="space-y-4">
-                                            {homeworkTasksEnriched.map((task, idx) => {
-                                                const files = task.loadedHwAttachments || [];
-                                                return (
-                                                    <div key={task.id || idx} className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 break-inside-avoid">
-                                                        <div className="flex items-center justify-between mb-2">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="font-bold text-stone-800 text-sm">{task.title}</span>
-                                                                {task.lessonTopic && (
-                                                                    <span className="text-xs text-purple-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-100">{task.lessonTopic}</span>
-                                                                )}
-                                                            </div>
-                                                            <div className="flex items-center gap-2 text-xs">
-                                                                <span className="text-stone-500" dir="rtl">
-                                                                    {task.dueDate ? `הגשה: ${new Date(task.dueDate).toLocaleDateString('he-IL')}` : ''}
-                                                                </span>
-                                                                {task.completed ? (
-                                                                    <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 text-[11px] font-bold">הוגש ✅</span>
-                                                                ) : (
-                                                                    <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 text-[11px] font-bold">פתוח ⏳</span>
-                                                                )}
-                                                                {task.understandingRating && (
-                                                                    <span className="text-amber-800 font-bold bg-amber-100/80 px-2 py-0.5 rounded text-[11px]">הבנה: {task.understandingRating}/5</span>
-                                                                )}
-                                                            </div>
+                                    {homeworkTasks.length > 0 ? (
+                                        <div className="space-y-3">
+                                            {homeworkTasks.map((task, idx) => (
+                                                <div key={task.id || idx} className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 break-inside-avoid">
+                                                    <div className="flex items-center justify-between mb-1.5">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="font-bold text-stone-800 text-sm">{task.title}</span>
+                                                            {task.lessonTopic && (
+                                                                <span className="text-xs text-purple-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-100 font-medium">{task.lessonTopic}</span>
+                                                            )}
                                                         </div>
-                                                        {task.hardExercises && (
-                                                            <div className="text-xs text-rose-800 bg-rose-50 p-2 rounded border border-rose-100 mb-2">
-                                                                <strong>תרגילים מאתגרים:</strong> {task.hardExercises}
-                                                            </div>
-                                                        )}
-                                                        {files.length > 0 ? (
-                                                            <div className="mt-3 space-y-3">
-                                                                <div className="text-xs font-bold text-indigo-900 flex items-center gap-1.5">
-                                                                    <span>📄</span> קובצי שיעורי בית ודפי עבודה ({files.length}):
-                                                                </div>
-                                                                {files.map((f, fIdx) => {
-                                                                    if (f.pdfPages && f.pdfPages.length > 0) {
-                                                                        return (
-                                                                            <div key={f.id || fIdx} className="space-y-4 my-2">
-                                                                                {f.pdfPages.map(page => (
-                                                                                    <div key={page.pageNumber} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid shadow-xs">
-                                                                                        <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
-                                                                                            <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
-                                                                                                <span>📄</span> {f.name}
-                                                                                            </span>
-                                                                                            <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
-                                                                                                עמוד {page.pageNumber} מתוך {page.totalPages}
-                                                                                            </span>
-                                                                                        </div>
-                                                                                        <img 
-                                                                                            src={page.dataUrl} 
-                                                                                            alt={`${f.name} - עמוד ${page.pageNumber}`} 
-                                                                                            className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
-                                                                                        />
-                                                                                    </div>
-                                                                                ))}
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    const isImg = f.dataUrl && (f.dataUrl.startsWith('data:image/') || f.type?.startsWith('image/'));
-                                                                    if (isImg) {
-                                                                        return (
-                                                                            <div key={f.id || fIdx} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white text-center break-inside-avoid my-2 shadow-xs">
-                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
-                                                                                    <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
-                                                                                        <span>📄</span> {f.name || 'דף עבודה / תרגילים'}
-                                                                                    </span>
-                                                                                    <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
-                                                                                        תמונת דף עבודה
-                                                                                    </span>
-                                                                                </div>
-                                                                                <img 
-                                                                                    src={f.dataUrl} 
-                                                                                    alt={f.name || 'דף עבודה'} 
-                                                                                    className="w-full max-w-4xl mx-auto object-contain rounded-lg border border-stone-200 shadow-xs" 
-                                                                                />
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    if (f.dataUrl && f.dataUrl.startsWith('data:application/pdf')) {
-                                                                        return (
-                                                                            <div key={f.id || fIdx} className="border-2 border-indigo-200 rounded-2xl p-4 bg-white break-inside-avoid my-2 shadow-xs">
-                                                                                <div className="flex items-center justify-between text-xs font-bold text-stone-700 mb-3 pb-2 border-b border-stone-200">
-                                                                                    <span className="flex items-center gap-2 text-indigo-950 font-black text-sm">
-                                                                                        <span>📄</span> {f.name}
-                                                                                    </span>
-                                                                                    <span className="bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full text-xs font-bold">
-                                                                                        מסמך PDF
-                                                                                    </span>
-                                                                                </div>
-                                                                                <iframe src={f.dataUrl} title={f.name} className="w-full h-[650px] rounded-lg border border-stone-200"></iframe>
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    return (
-                                                                        <div key={f.id || fIdx} className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200 my-2 flex items-center justify-between">
-                                                                            <span>⚠️ לא ניתן היה לטעון את תוכן הקובץ ({f.name})</span>
-                                                                            <span className="text-[11px] text-stone-500 font-mono">{f.name}</span>
-                                                                        </div>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                        ) : null}
+                                                        <div className="flex items-center gap-2 text-xs">
+                                                            <span className="text-stone-500" dir="rtl">
+                                                                {task.dueDate ? `הגשה: ${new Date(task.dueDate).toLocaleDateString('he-IL')}` : ''}
+                                                            </span>
+                                                            {task.completed ? (
+                                                                <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 text-[11px] font-bold">הוגש ✅</span>
+                                                            ) : (
+                                                                <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 text-[11px] font-bold">פתוח ⏳</span>
+                                                            )}
+                                                            {task.understandingRating && (
+                                                                <span className="text-amber-800 font-bold bg-amber-100/80 px-2 py-0.5 rounded text-[11px]">הבנה: {task.understandingRating}/5</span>
+                                                            )}
+                                                        </div>
                                                     </div>
-                                                );
-                                            })}
+                                                    {task.hardExercises && (
+                                                        <div className="text-xs text-rose-800 bg-rose-50 p-2 rounded border border-rose-100 mt-2">
+                                                            <strong>תרגילים מאתגרים:</strong> {task.hardExercises}
+                                                        </div>
+                                                    )}
+                                                    {task.notes && (
+                                                        <p className="text-xs text-stone-600 mt-1.5 bg-white p-2 rounded border border-stone-100 whitespace-pre-wrap">{task.notes}</p>
+                                                    )}
+                                                </div>
+                                            ))}
                                         </div>
                                     ) : (
                                         <div className="text-stone-500 text-xs italic p-3 bg-stone-50 rounded-lg border border-stone-200">
@@ -8046,13 +7847,20 @@ function App() {
                                                     <button 
                                                         type="button" 
                                                         onClick={() => {
-                                                            const w = window.open();
-                                                            if (w) {
-                                                                if (isPdf) {
-                                                                    w.document.write(`<iframe src="${currentDataUrl}" style="border:0; top:0; left:0; bottom:0; right:0; width:100%; height:100%;" allowfullscreen></iframe>`);
-                                                                } else {
-                                                                    w.document.write(`<img src="${currentDataUrl}" style="max-width:100%; height:auto; display:block; margin:auto;" />`);
+                                                            try {
+                                                                const arr = currentDataUrl.split(',');
+                                                                const mime = arr[0].match(/:(.*?);/)?.[1] || 'application/octet-stream';
+                                                                const bstr = atob(arr[1].replace(/\s/g, ''));
+                                                                let n = bstr.length;
+                                                                const u8arr = new Uint8Array(n);
+                                                                while (n--) {
+                                                                    u8arr[n] = bstr.charCodeAt(n);
                                                                 }
+                                                                const blob = new Blob([u8arr], { type: mime });
+                                                                const blobUrl = URL.createObjectURL(blob);
+                                                                window.open(blobUrl, '_blank');
+                                                            } catch(e) {
+                                                                window.open(currentDataUrl, '_blank');
                                                             }
                                                         }}
                                                         className="px-3 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95" 
@@ -8082,30 +7890,67 @@ function App() {
                                     </div>
 
                                     {/* Content Body */}
-                                    <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-stone-100/50 min-h-[360px] max-h-[70vh]">
+                                    <div className="flex-1 overflow-auto p-3 md:p-6 flex flex-col items-center justify-start bg-stone-100/60 min-h-[380px] max-h-[75vh] custom-scrollbar">
                                         {loading ? (
-                                            <div className="flex flex-col items-center gap-3 text-stone-400 animate-pulse">
+                                            <div className="my-auto flex flex-col items-center gap-3 text-stone-400 animate-pulse">
                                                 <div className="text-4xl animate-spin">⏳</div>
-                                                <div className="text-sm font-bold">טוען קובץ...</div>
+                                                <div className="text-sm font-bold">טוען קובץ מהענן...</div>
                                             </div>
                                         ) : !currentDataUrl ? (
-                                            <div className="text-center p-8 text-stone-400">
-                                                <div className="text-3xl mb-2">⚠️</div>
-                                                <div className="font-bold text-stone-600">לא ניתן היה לטעון את תוכן הקובץ</div>
-                                                <div className="text-xs mt-1">ייתכן שהקובץ נשמר במכשיר אחר או שזיכרון הדפדפן נוקה.</div>
+                                            <div className="my-auto text-center p-8 text-stone-400">
+                                                <div className="text-4xl mb-2">⚠️</div>
+                                                <div className="font-bold text-stone-700 text-base">לא ניתן היה לטעון את תוכן הקובץ</div>
+                                                <div className="text-xs mt-1 text-stone-500">ייתכן שהקובץ נמחק או שאין חיבור אינטרנט זמין.</div>
                                             </div>
                                         ) : isPdf ? (
-                                            <iframe 
-                                                src={currentDataUrl} 
-                                                title={currentAtt.name} 
-                                                className="w-full h-[65vh] rounded-2xl border border-stone-200 bg-white shadow-sm"
-                                            />
+                                            viewingAttachment.pdfPages && viewingAttachment.pdfPages.length > 0 ? (
+                                                <div className="w-full max-w-3xl space-y-4 py-1">
+                                                    <div className="text-center text-xs text-stone-500 font-medium pb-1 flex items-center justify-between px-2">
+                                                        <span>📄 {currentAtt.name}</span>
+                                                        <span className="bg-purple-100 text-purple-800 px-2.5 py-0.5 rounded-full font-bold">
+                                                            {viewingAttachment.pdfPages.length} עמודים • גלילה מותאמת לנייד
+                                                        </span>
+                                                    </div>
+                                                    {viewingAttachment.pdfPages.map(page => (
+                                                        <div key={page.pageNumber} className="bg-white rounded-2xl p-2 md:p-4 shadow-sm border border-stone-200 text-center">
+                                                            <div className="flex items-center justify-between text-xs text-stone-400 mb-2 px-1">
+                                                                <span className="font-bold text-stone-600">עמוד {page.pageNumber} מתוך {page.totalPages}</span>
+                                                            </div>
+                                                            <img 
+                                                                src={page.dataUrl} 
+                                                                alt={`${currentAtt.name} - עמוד ${page.pageNumber}`} 
+                                                                className="w-full rounded-xl object-contain border border-stone-100 shadow-xs" 
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="w-full h-full flex flex-col items-center justify-center p-2 my-auto">
+                                                    <iframe 
+                                                        src={currentDataUrl} 
+                                                        title={currentAtt.name} 
+                                                        className="w-full h-[65vh] rounded-2xl border border-stone-200 bg-white shadow-sm mb-3 hidden md:block"
+                                                    />
+                                                    <div className="md:hidden flex flex-col items-center justify-center p-6 bg-white rounded-2xl border border-stone-200 text-center w-full max-w-sm shadow-sm my-auto">
+                                                        <div className="text-5xl mb-3">📄</div>
+                                                        <div className="font-bold text-stone-800 text-base mb-1">{currentAtt.name}</div>
+                                                        <div className="text-xs text-stone-500 mb-4">{window.FileStorage?.formatFileSize(currentAtt.size)}</div>
+                                                        <a 
+                                                            href={currentDataUrl} 
+                                                            download={currentAtt.name} 
+                                                            className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl text-sm shadow-md flex items-center justify-center gap-2 active:scale-95"
+                                                        >
+                                                            <span>⬇️</span> פתיחה והורדת קובץ PDF
+                                                        </a>
+                                                    </div>
+                                                </div>
+                                            )
                                         ) : (
-                                            <div className="w-full h-full flex items-center justify-center p-2">
+                                            <div className="w-full h-full flex items-center justify-center p-2 my-auto">
                                                 <img 
                                                     src={currentDataUrl} 
                                                     alt={currentAtt.name} 
-                                                    className="max-h-[65vh] max-w-full rounded-2xl object-contain shadow-lg border border-stone-200 bg-white"
+                                                    className="max-h-[68vh] max-w-full rounded-2xl object-contain shadow-lg border border-stone-200 bg-white"
                                                 />
                                             </div>
                                         )}
@@ -8190,59 +8035,33 @@ function App() {
                                 <div className="space-y-3 mb-6">
                                     <div className="text-xs font-bold text-stone-700 mb-1">בחרי את פורמט ההדפסה הרצוי:</div>
 
-                                    {/* Option 1: All */}
+                                    {/* Option 1: Regular */}
                                     <div 
-                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'all' }))}
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'regular' }))}
                                         className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
-                                            examPrintModal.mode === 'all' 
+                                            examPrintModal.mode === 'regular' 
                                                 ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
                                                 : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
                                         }`}
                                     >
                                         <div className="flex items-start gap-3">
                                             <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
-                                                examPrintModal.mode === 'all' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
+                                                examPrintModal.mode === 'regular' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
                                             }`}>
-                                                {examPrintModal.mode === 'all' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                                                {examPrintModal.mode === 'regular' && <div className="w-2 h-2 rounded-full bg-white"></div>}
                                             </div>
                                             <div>
                                                 <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
-                                                    <span>🌟 חוברת הכנה מקיפה (הכל ביחד)</span>
+                                                    <span>📝 חוברת הכנה רגילה (טקסט וסיכום בלבד)</span>
                                                 </div>
                                                 <p className="text-xs text-stone-500 mt-1">
-                                                    הכל ביחד: סילבוס, תרגילים קשים, יומן שיעורים עם צילומי לוח, דפי עבודה של ש.ב והיסטוריית ציונים.
+                                                    סילבוס, תרגילים קשים, יומן כותרות שיעורים, רשימת שיעורי בית, מבחנים קודמים וצ'ק-ליסט — קובץ קל, מהיר וממוקד (ללא תמונות וקבצים).
                                                 </p>
                                             </div>
                                         </div>
                                     </div>
 
-                                    {/* Option 2: Text Only (Fast, No Files/Images) */}
-                                    <div 
-                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'text_only' }))}
-                                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
-                                            examPrintModal.mode === 'text_only' 
-                                                ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
-                                                : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
-                                        }`}
-                                    >
-                                        <div className="flex items-start gap-3">
-                                            <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
-                                                examPrintModal.mode === 'text_only' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
-                                            }`}>
-                                                {examPrintModal.mode === 'text_only' && <div className="w-2 h-2 rounded-full bg-white"></div>}
-                                            </div>
-                                            <div>
-                                                <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
-                                                    <span>📝 חוברת טקסטואלית בלבד (ללא קבצים ותמונות)</span>
-                                                </div>
-                                                <p className="text-xs text-stone-500 mt-1">
-                                                    סילבוס, תרגילים קשים, יומן כותרות שיעורים, רשימת ש.ב ומבחנים — קובץ קל ומהיר ללא תמונות או PDF.
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Option 3: Lessons & Board Photos Only */}
+                                    {/* Option 2: Lessons & Board Photos */}
                                     <div 
                                         onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'lessons' }))}
                                         className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
@@ -8262,171 +8081,34 @@ function App() {
                                                     <span>📸 יומן שיעורים וצילומי לוח בלבד</span>
                                                 </div>
                                                 <p className="text-xs text-stone-500 mt-1">
-                                                    רק כותרות השיעורים, התאריכים וצילומי הלוח מהכיתה (ללא שיעורי בית וללא נספחים).
+                                                    רק כותרות השיעורים, התאריכים, ההערות וצילומי הלוח מהכיתה (ללא שיעורי בית וללא נספחים).
                                                 </p>
                                             </div>
                                         </div>
                                     </div>
 
-                                    {/* Option 3: Homework & Worksheets Only */}
+                                    {/* Option 3: All (Both Together) */}
                                     <div 
-                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'homework' }))}
+                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'all' }))}
                                         className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
-                                            examPrintModal.mode === 'homework' 
+                                            examPrintModal.mode === 'all' 
                                                 ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
                                                 : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
                                         }`}
                                     >
                                         <div className="flex items-start gap-3">
                                             <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
-                                                examPrintModal.mode === 'homework' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
+                                                examPrintModal.mode === 'all' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
                                             }`}>
-                                                {examPrintModal.mode === 'homework' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                                                {examPrintModal.mode === 'all' && <div className="w-2 h-2 rounded-full bg-white"></div>}
                                             </div>
                                             <div>
                                                 <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
-                                                    <span>📄 דפי עבודה ושיעורי בית בלבד</span>
+                                                    <span>🌟 חוברת מקיפה + צילומי לוח (שניהם ביחד)</span>
                                                 </div>
                                                 <p className="text-xs text-stone-500 mt-1">
-                                                    רק שמות המטלות, שאלות שיעורי הבית וקבצי דפי העבודה המצורפים (ללא צילומי לוח מהכיתה).
+                                                    כל תוכן החוברת הרגילה (סילבוס, שיעורי בית, מבחנים) בתוספת צילומי הלוח מהכיתה מכל השיעורים.
                                                 </p>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Option 4: Custom */}
-                                    <div 
-                                        onClick={() => !isPreparingPrint && setExamPrintModal(prev => ({ ...prev, mode: 'custom' }))}
-                                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
-                                            examPrintModal.mode === 'custom' 
-                                                ? 'border-purple-600 bg-purple-50/70 shadow-xs' 
-                                                : 'border-stone-200 hover:border-stone-300 bg-stone-50/50'
-                                        }`}
-                                    >
-                                        <div className="flex items-start gap-3">
-                                            <div className={`w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
-                                                examPrintModal.mode === 'custom' ? 'border-purple-600 bg-purple-600' : 'border-stone-300'
-                                            }`}>
-                                                {examPrintModal.mode === 'custom' && <div className="w-2 h-2 rounded-full bg-white"></div>}
-                                            </div>
-                                            <div className="flex-1">
-                                                <div className="font-bold text-stone-900 text-sm flex items-center gap-1.5">
-                                                    <span>⚙️ התאמה אישית של תוכן ההדפסה</span>
-                                                </div>
-                                                <p className="text-xs text-stone-500 mt-1">
-                                                    בחרי ידנית אילו מקטעים לכלול בדף המודפס:
-                                                </p>
-
-                                                {/* Checkboxes */}
-                                                {examPrintModal.mode === 'custom' && (
-                                                    <div className="mt-3 pt-3 border-t border-purple-200/80 space-y-2 text-xs">
-                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                            <input 
-                                                                type="checkbox" 
-                                                                checked={examPrintModal.customSections?.summary ?? true}
-                                                                onChange={(e) => {
-                                                                    const val = e.target.checked;
-                                                                    setExamPrintModal(prev => ({
-                                                                        ...prev,
-                                                                        customSections: { ...prev.customSections, summary: val }
-                                                                    }));
-                                                                }}
-                                                                className="rounded text-purple-600 focus:ring-purple-500"
-                                                            />
-                                                            <span className="font-medium text-stone-700">מדדי סיכום (KPI)</span>
-                                                        </label>
-                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                            <input 
-                                                                type="checkbox" 
-                                                                checked={examPrintModal.customSections?.syllabus ?? true}
-                                                                onChange={(e) => {
-                                                                    const val = e.target.checked;
-                                                                    setExamPrintModal(prev => ({
-                                                                        ...prev,
-                                                                        customSections: { ...prev.customSections, syllabus: val }
-                                                                    }));
-                                                                }}
-                                                                className="rounded text-purple-600 focus:ring-purple-500"
-                                                            />
-                                                            <span className="font-medium text-stone-700">סילבוס ונושאי לימוד</span>
-                                                        </label>
-                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                            <input 
-                                                                type="checkbox" 
-                                                                checked={examPrintModal.customSections?.lessonsWithBoard ?? true}
-                                                                onChange={(e) => {
-                                                                    const val = e.target.checked;
-                                                                    setExamPrintModal(prev => ({
-                                                                        ...prev,
-                                                                        customSections: { ...prev.customSections, lessonsWithBoard: val }
-                                                                    }));
-                                                                }}
-                                                                className="rounded text-purple-600 focus:ring-purple-500"
-                                                            />
-                                                            <span className="font-medium text-stone-700">📸 יומן שיעורים וצילומי לוח</span>
-                                                        </label>
-                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                            <input 
-                                                                type="checkbox" 
-                                                                checked={examPrintModal.customSections?.homeworkWithFiles ?? true}
-                                                                onChange={(e) => {
-                                                                    const val = e.target.checked;
-                                                                    setExamPrintModal(prev => ({
-                                                                        ...prev,
-                                                                        customSections: { ...prev.customSections, homeworkWithFiles: val }
-                                                                    }));
-                                                                }}
-                                                                className="rounded text-purple-600 focus:ring-purple-500"
-                                                            />
-                                                            <span className="font-medium text-stone-700">📄 שיעורי בית וקובצי דפי עבודה</span>
-                                                        </label>
-                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                            <input 
-                                                                type="checkbox" 
-                                                                checked={examPrintModal.customSections?.weaknesses ?? true}
-                                                                onChange={(e) => {
-                                                                    const val = e.target.checked;
-                                                                    setExamPrintModal(prev => ({
-                                                                        ...prev,
-                                                                        customSections: { ...prev.customSections, weaknesses: val }
-                                                                    }));
-                                                                }}
-                                                                className="rounded text-purple-600 focus:ring-purple-500"
-                                                            />
-                                                            <span className="font-medium text-stone-700">מוקדי קושי ותרגילים מאתגרים</span>
-                                                        </label>
-                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                            <input 
-                                                                type="checkbox" 
-                                                                checked={examPrintModal.customSections?.exams ?? true}
-                                                                onChange={(e) => {
-                                                                    const val = e.target.checked;
-                                                                    setExamPrintModal(prev => ({
-                                                                        ...prev,
-                                                                        customSections: { ...prev.customSections, exams: val }
-                                                                    }));
-                                                                }}
-                                                                className="rounded text-purple-600 focus:ring-purple-500"
-                                                            />
-                                                            <span className="font-medium text-stone-700">מבחנים קודמים וציונים</span>
-                                                        </label>
-                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                            <input 
-                                                                type="checkbox" 
-                                                                checked={examPrintModal.customSections?.checklist ?? true}
-                                                                onChange={(e) => {
-                                                                    const val = e.target.checked;
-                                                                    setExamPrintModal(prev => ({
-                                                                        ...prev,
-                                                                        customSections: { ...prev.customSections, checklist: val }
-                                                                    }));
-                                                                }}
-                                                                className="rounded text-purple-600 focus:ring-purple-500"
-                                                            />
-                                                            <span className="font-medium text-stone-700">צ'ק-ליסט אישי ליום הבחינה</span>
-                                                        </label>
-                                                    </div>
-                                                )}
                                             </div>
                                         </div>
                                     </div>
@@ -8444,19 +8126,19 @@ function App() {
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={() => prepareAndPrintExam(examPrintModal.subjectId, examPrintModal.mode, examPrintModal.customSections)}
+                                        onClick={() => prepareAndPrintExam(examPrintModal.subjectId, examPrintModal.mode)}
                                         disabled={isPreparingPrint}
                                         className="flex-2 py-3 px-6 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-sm shadow-md transition-all active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
                                     >
                                         {isPreparingPrint ? (
                                             <>
                                                 <span className="animate-spin text-lg">⏳</span>
-                                                <span>מכין תמונות וקבצים להדפסה...</span>
+                                                <span>מכין חוברת להדפסה...</span>
                                             </>
                                         ) : (
                                             <>
                                                 <span>🖨️</span>
-                                                <span>הדפסה / שמירה כ-PDF</span>
+                                                <span>הפקת חוברת להדפסה / שמירה כ-PDF</span>
                                             </>
                                         )}
                                     </button>

@@ -173,23 +173,12 @@ const FileStorage = (() => {
         // 1. Always save in local IndexedDB (instant offline availability)
         await saveToIndexedDB(item);
 
-        // 2. If under ~750KB and Firestore is available, save into separate collection for cloud sync
-        const canSyncToFirestore = sizeInBytes < 750 * 1024 && typeof db !== 'undefined' && db;
-        if (canSyncToFirestore) {
+        // 2. Cloud sync to Firestore for cross-device availability (PC <-> Phone)
+        if (typeof db !== 'undefined' && db) {
             try {
-                db.collection('task_attachments').doc(id).set({
-                    id,
-                    name,
-                    type: item.type,
-                    size: item.size,
-                    category: item.category,
-                    dataUrl,
-                    uploadedAt: item.uploadedAt
-                }).catch(err => {
-                    console.warn('Cloud sync of attachment skipped:', err.message);
-                });
+                await saveAttachmentToCloud(item);
             } catch (err) {
-                console.warn('Cloud sync error (prevented crash):', err);
+                console.warn('Cloud sync of attachment skipped:', err.message);
             }
         }
 
@@ -205,10 +194,59 @@ const FileStorage = (() => {
     };
 
     /**
-     * Retrieve the full file dataUrl for viewing
+     * Save attachment to Firestore for cross-device sync.
+     * Uses chunking if dataUrl exceeds ~600KB so files up to 10MB+ sync without hitting Firestore's 1MB limit.
      */
+    const saveAttachmentToCloud = async (item) => {
+        if (!item || !item.id || !item.dataUrl || typeof db === 'undefined' || !db) return;
+        try {
+            const CHUNK_SIZE = 600000; // ~600,000 characters base64 (safe margin under Firestore 1MB)
+            const dataUrlLen = item.dataUrl.length;
+
+            if (dataUrlLen <= CHUNK_SIZE) {
+                await db.collection('task_attachments').doc(item.id).set({
+                    id: item.id,
+                    name: item.name,
+                    type: item.type,
+                    size: item.size,
+                    category: item.category,
+                    dataUrl: item.dataUrl,
+                    isChunked: false,
+                    uploadedAt: item.uploadedAt || new Date().toISOString()
+                });
+            } else {
+                const totalChunks = Math.ceil(dataUrlLen / CHUNK_SIZE);
+                // 1. Write parent metadata doc
+                await db.collection('task_attachments').doc(item.id).set({
+                    id: item.id,
+                    name: item.name,
+                    type: item.type,
+                    size: item.size,
+                    category: item.category,
+                    isChunked: true,
+                    totalChunks: totalChunks,
+                    uploadedAt: item.uploadedAt || new Date().toISOString()
+                });
+                // 2. Write each chunk
+                const batch = db.batch();
+                for (let i = 0; i < totalChunks; i++) {
+                    const chunkData = item.dataUrl.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+                    const chunkRef = db.collection('task_attachments').doc(`${item.id}_c${i}`);
+                    batch.set(chunkRef, {
+                        attachmentId: item.id,
+                        chunkIndex: i,
+                        data: chunkData
+                    });
+                }
+                await batch.commit();
+            }
+        } catch (err) {
+            console.warn('Cloud sync error for attachment:', item.id, err);
+        }
+    };
+
     /**
-     * Retrieve the full file dataUrl for viewing or printing
+     * Retrieve the full file dataUrl for viewing or printing (supports cross-device sync & chunking)
      */
     const loadAttachmentData = async (attachment) => {
         if (!attachment) return null;
@@ -218,19 +256,36 @@ const FileStorage = (() => {
         // 1. Try local IndexedDB first
         const local = await getFromIndexedDB(attachment.id);
         if (local && local.dataUrl) {
+            // If online, lazily ensure it exists in Firestore for cross-device sync
+            if (typeof db !== 'undefined' && db && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+                saveAttachmentToCloud(local).catch(() => {});
+            }
             return local.dataUrl;
         }
 
-        // 2. If not local, try fetching from Firestore subcollection
+        // 2. If not local, fetch from Firestore cloud collection (multi-device sync)
         if (typeof db !== 'undefined' && db) {
             try {
                 const doc = await db.collection('task_attachments').doc(attachment.id).get();
                 if (doc.exists) {
                     const data = doc.data();
-                    if (data && data.dataUrl) {
-                        // Cache back into local IndexedDB
-                        saveToIndexedDB(data);
-                        return data.dataUrl;
+                    let fullDataUrl = data.dataUrl || null;
+
+                    // If chunked, fetch all chunks and assemble
+                    if (data.isChunked && data.totalChunks > 0) {
+                        const chunkPromises = [];
+                        for (let i = 0; i < data.totalChunks; i++) {
+                            chunkPromises.push(db.collection('task_attachments').doc(`${attachment.id}_c${i}`).get());
+                        }
+                        const chunkDocs = await Promise.all(chunkPromises);
+                        fullDataUrl = chunkDocs.map(cd => cd.exists ? (cd.data()?.data || '') : '').join('');
+                    }
+
+                    if (fullDataUrl) {
+                        const fullItem = { ...data, dataUrl: fullDataUrl };
+                        // Automatically cache into the device's local IndexedDB so future access is instant & offline!
+                        await saveToIndexedDB(fullItem);
+                        return fullDataUrl;
                     }
                 }
             } catch (err) {
@@ -321,8 +376,23 @@ const FileStorage = (() => {
         await deleteFromIndexedDB(id);
         if (typeof db !== 'undefined' && db) {
             try {
-                db.collection('task_attachments').doc(id).delete().catch(() => {});
-            } catch (e) {}
+                const doc = await db.collection('task_attachments').doc(id).get();
+                if (doc.exists) {
+                    const data = doc.data();
+                    if (data.isChunked && data.totalChunks > 0) {
+                        const batch = db.batch();
+                        batch.delete(db.collection('task_attachments').doc(id));
+                        for (let i = 0; i < data.totalChunks; i++) {
+                            batch.delete(db.collection('task_attachments').doc(`${id}_c${i}`));
+                        }
+                        await batch.commit();
+                        return;
+                    }
+                }
+                await db.collection('task_attachments').doc(id).delete();
+            } catch (e) {
+                console.warn('Error deleting cloud attachment:', e);
+            }
         }
     };
 
