@@ -34,6 +34,21 @@ function App() {
             const pendingWriteSync = useRef(0);
             const hasRemoteSynced = useRef(false);
 
+            // Cloud Sync Status & Outbox Diagnostics State
+            const [syncState, setSyncState] = useState(() => (typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'synced'));
+            const [syncErrorDetails, setSyncErrorDetails] = useState('');
+            const [isSyncDiagnosticsOpen, setIsSyncDiagnosticsOpen] = useState(false);
+            const [editingExam, setEditingExam] = useState(null);
+
+            // Safety snapshot backup before first remote sync session
+            useEffect(() => {
+                try {
+                    if (globalState.activeUser && !localStorage.getItem('studyStreakData_backup_pre_sync')) {
+                        localStorage.setItem('studyStreakData_backup_pre_sync', JSON.stringify(globalState));
+                    }
+                } catch (e) {}
+            }, [globalState.activeUser]);
+
             useEffect(() => {
                 hasRemoteSynced.current = false;
                 const timeout = setTimeout(() => {
@@ -48,14 +63,19 @@ function App() {
             }, [globalState]);
 
 
+            // Live Firestore Snapshot with error diagnosis
             useEffect(() => {
-                if (!globalState.activeUser || !db) return;
-
+                if (!globalState.activeUser || !db) {
+                    if (!db) setSyncState(navigator.onLine ? 'error' : 'offline');
+                    return;
+                }
 
                 const userRef = db.collection("users").doc(globalState.activeUser);
                 
                 const unsubscribe = userRef.onSnapshot((doc) => {
                     hasRemoteSynced.current = true;
+                    setSyncState('synced');
+                    setSyncErrorDetails('');
                     if (doc.exists) {
                         const liveData = doc.data();
                         
@@ -75,12 +95,111 @@ function App() {
                     }
                 }, (error) => {
                     console.error("Live sync error:", error);
+                    setSyncState('error');
+                    const isPerm = error.code === 'permission-denied' || String(error.message).includes('permission');
+                    setSyncErrorDetails(isPerm 
+                        ? 'חוקי האבטחה ב-Firebase פגו (Permission Denied). לחצי לתיקון מהיר.' 
+                        : (error.message || 'שגיאת התחברות לענן'));
                 });
-
 
                 return () => unsubscribe();
             }, [globalState.activeUser]);
 
+            // Manual & Continuous Cloud Push for Outbox Queue
+            const pushPendingSyncToCloud = async (forceUser = null) => {
+                const targetUser = forceUser || globalState.activeUser;
+                if (!targetUser || !db) return false;
+                setSyncState('syncing');
+                try {
+                    const pending = typeof getPendingSync === 'function' ? getPendingSync(targetUser) : null;
+                    const userToUpload = pending?.data || globalState.users[targetUser];
+                    if (!userToUpload) {
+                        setSyncState('synced');
+                        return true;
+                    }
+                    const cleanData = sanitizeForFirestore(userToUpload);
+                    await db.collection("users").doc(targetUser).set(cleanData, { merge: true });
+                    if (typeof clearPendingSync === 'function') {
+                        clearPendingSync(targetUser);
+                    }
+                    setSyncState('synced');
+                    setSyncErrorDetails('');
+                    return true;
+                } catch (err) {
+                    console.error("Manual push sync failed:", err);
+                    setSyncState('error');
+                    const isPerm = err.code === 'permission-denied' || String(err.message).includes('permission');
+                    setSyncErrorDetails(isPerm 
+                        ? 'חוקי האבטחה ב-Firebase פגו (Permission Denied)' 
+                        : (err.message || 'שגיאה בסנכרון לענן'));
+                    return false;
+                }
+            };
+
+            // Continuous Background Health Check (Every 35 seconds + Focus + Online)
+            useEffect(() => {
+                if (!globalState.activeUser) return;
+
+                const runHealthCheck = async () => {
+                    if (!navigator.onLine) {
+                        setSyncState('offline');
+                        return;
+                    }
+                    if (!db) {
+                        setSyncState('error');
+                        setSyncErrorDetails('Firebase לא אותחל');
+                        return;
+                    }
+
+                    // 1. Drain pending outbox changes if any
+                    const pending = typeof getPendingSync === 'function' ? getPendingSync(globalState.activeUser) : null;
+                    if (pending) {
+                        await pushPendingSyncToCloud();
+                        return;
+                    }
+
+                    // 2. Probe read permission
+                    try {
+                        await db.collection("users").doc(globalState.activeUser).get();
+                        setSyncState(prev => prev === 'error' ? 'synced' : prev);
+                        setSyncErrorDetails('');
+                    } catch (err) {
+                        const isPerm = err.code === 'permission-denied' || String(err.message).includes('permission');
+                        setSyncState('error');
+                        if (isPerm) {
+                            setSyncErrorDetails('חוקי האבטחה ב-Firebase פגו (Permission Denied)');
+                        }
+                    }
+                };
+
+                runHealthCheck();
+                const interval = setInterval(runHealthCheck, 35000);
+
+                const onOnline = () => {
+                    setSyncState('syncing');
+                    runHealthCheck();
+                    showToast('חיבור האינטרנט חזר! מסנכרן שינויים לענן... 🔄', 'info');
+                };
+                const onOffline = () => {
+                    setSyncState('offline');
+                };
+                const onFocus = () => {
+                    runHealthCheck();
+                };
+
+                window.addEventListener('online', onOnline);
+                window.addEventListener('offline', onOffline);
+                window.addEventListener('focus', onFocus);
+                document.addEventListener('visibilitychange', onFocus);
+
+                return () => {
+                    clearInterval(interval);
+                    window.removeEventListener('online', onOnline);
+                    window.removeEventListener('offline', onOffline);
+                    window.removeEventListener('focus', onFocus);
+                    document.removeEventListener('visibilitychange', onFocus);
+                };
+            }, [globalState.activeUser]);
 
             const activeUserData = globalState.activeUser ? globalState.users[globalState.activeUser] : null;
 
@@ -113,14 +232,37 @@ function App() {
                     updatedUser.lastSync = Date.now();
                     pendingWriteSync.current = updatedUser.lastSync;
                     
+                    if (typeof markPendingSync === 'function') {
+                        markPendingSync(prev.activeUser, updatedUser);
+                    }
+
                     if (db) {
+                        setSyncState('syncing');
                         try {
                             const cleanData = sanitizeForFirestore(updatedUser);
                             db.collection("users").doc(prev.activeUser).set(cleanData, { merge: true })
-                              .catch(err => console.error("Error saving to Firebase: ", err));
+                              .then(() => {
+                                  setSyncState('synced');
+                                  setSyncErrorDetails('');
+                                  if (typeof clearPendingSync === 'function') {
+                                      clearPendingSync(prev.activeUser);
+                                  }
+                              })
+                              .catch(err => {
+                                  console.error("Error saving to Firebase: ", err);
+                                  setSyncState('error');
+                                  const isPerm = err.code === 'permission-denied' || String(err.message).includes('permission');
+                                  setSyncErrorDetails(isPerm 
+                                      ? 'חוקי האבטחה ב-Firebase פגו (Permission Denied). לחצי לבדיקה.' 
+                                      : (err.message || 'שגיאה בשמירה לענן'));
+                              });
                         } catch (err) {
                             console.error("Firebase sync error (prevented app crash): ", err);
+                            setSyncState('error');
+                            setSyncErrorDetails(err.message || 'שגיאה באתחול שמירה לענן');
                         }
+                    } else {
+                        setSyncState(navigator.onLine ? 'error' : 'offline');
                     }
 
                     return {
@@ -386,7 +528,7 @@ function App() {
                             }
                             return task.completed ? task : { ...task, completed: true };
                         }
-                        if (task.isLessonLog || !task.dueDate) return task;
+                        if (task.isLessonLog || !task.dueDate || task.isFlexibleExamSession) return task;
                         const timeStr = task.dueTime || '23:59:59';
                         const dueDate = new Date(`${task.dueDate}T${timeStr}`);
                         if (isNaN(dueDate.getTime())) return task;
@@ -749,6 +891,10 @@ function App() {
                 const totalPointsGained = Math.max(activeUserData.weeklyPoints || 0, historySum);
                 const currentStreak = activeUserData.taskStreak !== undefined ? activeUserData.taskStreak : (activeUserData.streak || 0);
 
+                const weekTasksWithHours = thisWeekTasks.filter(t => !t.givenUp && t.studyDurationHours);
+                const totalStudyHoursNum = weekTasksWithHours.reduce((sum, t) => sum + Number(t.studyDurationHours), 0);
+                const totalStudyHours = totalStudyHoursNum > 0 ? parseFloat(totalStudyHoursNum.toFixed(1)) : 0;
+
                 return {
                     startDate: startOfWeek.toLocaleDateString('he-IL'),
                     endDate: endOfWeek.toLocaleDateString('he-IL'),
@@ -758,6 +904,7 @@ function App() {
                     lessonsLogged,
                     thisWeekExams,
                     totalPointsGained,
+                    totalStudyHours,
                     currentStreak,
                     subjects: activeUserData.subjects || []
                 };
@@ -979,25 +1126,19 @@ function App() {
                         }
 
                         if (canSendRemindersNow) {
-                            const activeTasks = (activeUserData.tasks || []).filter(t => !t.completed && t.whatsappRemindersEnabled && t.dueDate);
-                            const lastSentMap = activeUserData.lastTaskRemindersSent || {};
-                            let updatedSentMap = null;
+                            const lastGlobalSent = activeUserData.lastGlobalWhatsAppReminderSent || 0;
+                            const hoursSinceGlobal = (Date.now() - lastGlobalSent) / (1000 * 60 * 60);
 
-                            activeTasks.forEach(task => {
-                                const lastSentTime = lastSentMap[task.id] || 0;
-                                const hoursSince = (Date.now() - lastSentTime) / (1000 * 60 * 60);
-
-                                // שליחה מרווחת (פעם ב-4 שעות לכל היותר למשימה)
-                                if (hoursSince >= 4) {
-                                    const sub = (activeUserData.subjects || []).find(s => s.id === task.subjectId);
-                                    const reminderMsg = WhatsAppService.generateStudentReminderText({
-                                        studentName: activeUserData.name || 'שלי',
-                                        subjectName: sub ? sub.name : 'כללי',
-                                        taskTitle: task.title,
-                                        dueDate: task.dueDate,
-                                        dueTime: task.dueTime,
-                                        freeSlotText: 'הזמן הפנוי שלך לפי הלו"ז'
-                                    });
+                            // מרווח גלובלי של 3.5 שעות לפחות בין תזכורות כדי למנוע ספאם!
+                            if (hoursSinceGlobal >= 3.5) {
+                                const activeTasks = (activeUserData.tasks || []).filter(t => !t.completed && t.whatsappRemindersEnabled && t.dueDate);
+                                if (activeTasks.length > 0) {
+                                    // מייצרים הודעה אחת מרוכזת ומעודנת במקום להציף בהודעות נפרדות
+                                    const reminderMsg = WhatsAppService.generateCombinedStudentReminderText(
+                                        activeUserData.name || 'שלי',
+                                        activeTasks,
+                                        activeUserData.subjects || []
+                                    );
 
                                     WhatsAppService.sendMessage({
                                         to: activeUserData.phoneNumber,
@@ -1005,16 +1146,14 @@ function App() {
                                         gatewayConfig: activeUserData.whatsappGateway
                                     }).then(res => {
                                         if (res && res.status === 'sent_gateway') {
-                                            if (!updatedSentMap) updatedSentMap = { ...lastSentMap };
-                                            updatedSentMap[task.id] = Date.now();
                                             updateUserData(prev => ({
                                                 ...prev,
-                                                lastTaskRemindersSent: updatedSentMap
+                                                lastGlobalWhatsAppReminderSent: Date.now()
                                             }));
                                         }
                                     }).catch(e => console.error('Automated WhatsApp reminder error:', e));
                                 }
-                            });
+                            }
                         }
                     }
                 };
@@ -1086,7 +1225,8 @@ function App() {
                 task: false, complete: false, subject: false, 
                 friend: false, pointsHistory: false, streakHistory: false,
                 addFriend: false, addAnchor: false, examPlanner: false, cancelExam: false, giveUp: false,
-                examGrade: false, quickExam: false, edit: false, reminderMode: false, notificationHelp: false
+                examGrade: false, quickExam: false, edit: false, reminderMode: false, notificationHelp: false,
+                singleExamSession: false
             });
 
 
@@ -1108,6 +1248,12 @@ function App() {
             const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
             const [examPrintModal, setExamPrintModal] = useState(null);
             const [isPreparingPrint, setIsPreparingPrint] = useState(false);
+            const [singleExamSessionData, setSingleExamSessionData] = useState({
+                examId: '',
+                customExamName: '',
+                customSubjectId: '',
+                title: ''
+            });
 
             useEffect(() => {
                 if (editingTask) {
@@ -1122,19 +1268,17 @@ function App() {
                 if (files.length === 0) return;
                 setIsUploadingAttachment(true);
                 try {
-                    const processedList = [];
-                    for (const f of files) {
-                        showToast(`מעבד: ${f.name}... ⏳`, 'info');
-                        const saved = await window.FileStorage.processAndSaveFile(f, category);
-                        if (saved) processedList.push(saved);
+                    showToast(`מעבד ${files.length} קבצים באיכות גבוהה... ⏳`, 'info');
+                    const processedList = await window.FileStorage.processAndSaveFiles(files, category);
+                    if (processedList && processedList.length > 0) {
+                        if (target === 'new') {
+                            setTaskFormAttachments(prev => [...prev, ...processedList]);
+                        } else if (target === 'edit') {
+                            setEditTaskAttachments(prev => [...prev, ...processedList]);
+                        }
+                        const label = category === 'board' ? 'צילומי לוח' : (category === 'homework' ? 'דפי עבודה' : 'קבצים');
+                        showToast(`התווספו ${processedList.length} ${label} בהצלחה! 📎`, 'success');
                     }
-                    if (target === 'new') {
-                        setTaskFormAttachments(prev => [...prev, ...processedList]);
-                    } else if (target === 'edit') {
-                        setEditTaskAttachments(prev => [...prev, ...processedList]);
-                    }
-                    const label = category === 'board' ? 'צילומי לוח' : (category === 'homework' ? 'דפי עבודה' : 'קבצים');
-                    showToast(`התווספו ${processedList.length} ${label} בהצלחה! 📎`, 'success');
                 } catch (err) {
                     console.error('File process error:', err);
                     showToast('שגיאה בעיבוד הקובץ: ' + (err.message || err), 'error');
@@ -1144,27 +1288,37 @@ function App() {
                 }
             };
 
-            const handleQuickAddAttachmentToTask = async (task, file, category = 'general') => {
-                if (!task || !file) return;
+            const handleQuickAddAttachmentsToTask = async (task, files, category = 'general') => {
+                const fileList = Array.isArray(files) ? files : Array.from(files || []);
+                if (!task || fileList.length === 0) return;
                 setIsUploadingAttachment(true);
                 try {
-                    showToast(`מעבד קובץ למשימה... ⏳`, 'info');
-                    const saved = await window.FileStorage.processAndSaveFile(file, category);
-                    if (saved) {
-                        const updatedAttachments = [...(task.attachments || []), saved];
+                    showToast(`מעבד ${fileList.length} קבצים באיכות חדה... ⏳`, 'info');
+                    const savedList = await window.FileStorage.processAndSaveFiles(fileList, category);
+                    if (savedList && savedList.length > 0) {
                         updateUserData(prev => ({
                             ...prev,
-                            tasks: prev.tasks.map(t => t.id === task.id ? { ...t, attachments: updatedAttachments } : t)
+                            tasks: (prev.tasks || []).map(t => {
+                                if (t.id !== task.id) return t;
+                                return {
+                                    ...t,
+                                    attachments: [...(t.attachments || []), ...savedList]
+                                };
+                            })
                         }));
-                        const label = category === 'board' ? 'צילום הלוח' : (category === 'homework' ? 'דף העבודה' : 'הקובץ');
-                        showToast(`${label} צורף בהצלחה! 📎`, 'success');
+                        const label = category === 'board' ? 'צילומי לוח' : (category === 'homework' ? 'דפי עבודה' : 'קבצים');
+                        showToast(`${savedList.length} ${label} צורפו בהצלחה! 📎`, 'success');
                     }
                 } catch (err) {
-                    console.error('Quick attachment error:', err);
-                    showToast('שגיאה בצירוף הקובץ: ' + (err.message || err), 'error');
+                    console.error('Quick attachment batch error:', err);
+                    showToast('שגיאה בצירוף הקבצים: ' + (err.message || err), 'error');
                 } finally {
                     setIsUploadingAttachment(false);
                 }
+            };
+
+            const handleQuickAddAttachmentToTask = (task, file, category) => {
+                return handleQuickAddAttachmentsToTask(task, file ? [file] : [], category);
             };
 
             const openAttachmentViewer = async (task, initialIndex = 0, filterCategory = null) => {
@@ -1239,6 +1393,10 @@ function App() {
             const [taskGivenDate, setTaskGivenDate] = useState(() => new Date().toISOString().split('T')[0]);
             const [lateReason, setLateReason] = useState('');
             const [otherLateReason, setOtherLateReason] = useState('');
+            const [studyTimeMode, setStudyTimeMode] = useState('direct'); // 'direct' | 'range'
+            const [studyDurationHoursInput, setStudyDurationHoursInput] = useState('');
+            const [studyTimeStart, setStudyTimeStart] = useState('');
+            const [studyTimeEnd, setStudyTimeEnd] = useState('');
             const [taskFormSubject, setTaskFormSubject] = useState('');
             const [nowTime, setNowTime] = useState(() => Date.now());
 
@@ -1258,7 +1416,7 @@ function App() {
             }, [activeUserData?.tasks, taskFormSubject]);
             
             const [examPlannerData, setExamPlannerData] = useState({ 
-                step: 1, subjectId: '', examName: '', date: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '' 
+                step: 1, subjectId: '', examName: '', date: '', time: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '' 
             });
 
 
@@ -1684,8 +1842,75 @@ function App() {
                 }
             };
 
+            const calculateStudyDuration = (mode, directInput, startTime, endTime) => {
+                if (mode === 'direct') {
+                    if (directInput === undefined || directInput === null || directInput === '') return null;
+                    const cleanedStr = String(directInput).replace(',', '.').trim();
+                    const val = parseFloat(cleanedStr);
+                    if (isNaN(val) || val <= 0) return null;
+                    const totalMinutes = Math.round(val * 60);
+                    if (totalMinutes <= 0) return null;
+                    const hours = Math.floor(totalMinutes / 60);
+                    const mins = totalMinutes % 60;
+                    let formattedStr = '';
+                    if (hours > 0 && mins > 0) {
+                        formattedStr = `${hours} שע' ו-${mins} דק'`;
+                    } else if (hours > 0) {
+                        formattedStr = hours === 1 ? 'שעה' : (hours === 2 ? 'שעתיים' : `${hours} שעות`);
+                    } else {
+                        formattedStr = `${mins} דקות`;
+                    }
+                    return {
+                        studyDurationHours: parseFloat(val.toFixed(2)),
+                        studyDurationMinutes: totalMinutes,
+                        studyTimeRange: formattedStr,
+                        studyTimeStart: '',
+                        studyTimeEnd: ''
+                    };
+                } else if (mode === 'range') {
+                    if (!startTime || !endTime) return null;
+                    const [startH, startM] = startTime.split(':').map(Number);
+                    const [endH, endM] = endTime.split(':').map(Number);
+                    if (isNaN(startH) || isNaN(startM) || isNaN(endH) || isNaN(endM)) return null;
 
-            const handleCompleteTask = (task, rating, hardExercises, chosenLateReason) => {
+                    let startTotalMins = startH * 60 + startM;
+                    let endTotalMins = endH * 60 + endM;
+                    if (endTotalMins < startTotalMins) {
+                        endTotalMins += 24 * 60; // חציית חצות
+                    }
+                    const diffMins = endTotalMins - startTotalMins;
+                    if (diffMins <= 0) return null;
+
+                    const hoursExact = parseFloat((diffMins / 60).toFixed(2));
+                    const hours = Math.floor(diffMins / 60);
+                    const mins = diffMins % 60;
+                    const durText = (hours > 0 && mins > 0)
+                        ? `${hours} שע' ו-${mins} דק'`
+                        : (hours === 1 ? 'שעה' : (hours === 2 ? 'שעתיים' : (hours > 0 ? `${hours} שעות` : `${mins} דקות`)));
+
+                    return {
+                        studyDurationHours: hoursExact,
+                        studyDurationMinutes: diffMins,
+                        studyTimeRange: `${startTime} - ${endTime} (${durText})`,
+                        studyTimeStart: startTime,
+                        studyTimeEnd: endTime
+                    };
+                }
+                return null;
+            };
+
+            const handleOpenCompleteModal = (task) => {
+                setActiveTask(task);
+                setLateReason('');
+                setOtherLateReason('');
+                setStudyTimeMode('direct');
+                setStudyDurationHoursInput('');
+                setStudyTimeStart('');
+                setStudyTimeEnd('');
+                toggleModal('complete', true);
+            };
+
+            const handleCompleteTask = (task, rating, hardExercises, chosenLateReason, durationInfo = null) => {
                 const now = new Date();
                 const createdAt = new Date(task.createdAt);
                 let dueDate;
@@ -1713,7 +1938,12 @@ function App() {
                 let streakBroken = false;
 
 
-                if (!isLate) {
+                if (task.rewardPoints || task.isFlexibleExamSession) {
+                    pointsDelta = task.rewardPoints || 3;
+                    const sessionNumStr = task.sessionNumber ? ` ${task.sessionNumber}` : '';
+                    pointsText = `בוצע סשן למידה${sessionNumStr} למבחן (+${pointsDelta} נקודות)! 🎯`;
+                    streakBroken = false;
+                } else if (!isLate) {
                     if (usedDurationMs <= Math.max(totalDurationMs / 2, 86400000)) { 
                         pointsDelta = 2; pointsText = 'הוגש מוקדם! אלופה.';
                     } else {
@@ -1745,7 +1975,9 @@ function App() {
                     subjectEmoji: sub ? sub.emoji : '📚',
                     points: pointsDelta,
                     date: now.toISOString(),
-                    details: pointsText
+                    details: pointsText,
+                    studyDurationHours: durationInfo?.studyDurationHours || null,
+                    studyTimeRange: durationInfo?.studyTimeRange || null
                 };
 
 
@@ -1791,28 +2023,53 @@ function App() {
                     });
                 }
 
-                updateUserData(prev => checkAndAwardBadges({
-                    ...prev,
-                    tasks: prev.tasks.map(t => t.id === task.id ? { 
+                updateUserData(prev => {
+                    const updatedTasks = prev.tasks.map(t => t.id === task.id ? { 
                         ...t, completed: true, completedAt: t.completedAt || now.toISOString(), 
                         understandingRating: rating, hardExercises: hardExercises, pointsEarned: pointsDelta, lateReason: isLate ? chosenLateReason : '',
                         autoPenaltyApplied: isLate ? (t.autoPenaltyApplied || false) : false,
                         remindersEnabled: false,
-                        whatsappRemindersEnabled: false
-                    } : t),
-                    totalPoints: prev.totalPoints + pointsDelta,
-                    weeklyPoints: prev.weeklyPoints + pointsDelta,
-                    taskStreak: newStreak,
-                    longestStreak: newLongest,
-                    currentStreakStart: newStreakStart,
-                    currentStreakEmojis: newStreakEmojis,
-                    pointsHistory: pointsDelta !== 0 ? [historyLog, ...(prev.pointsHistory || [])] : (prev.pointsHistory || []),
-                    streakHistory: newStreakHistory
-                }));
+                        whatsappRemindersEnabled: false,
+                        studyDurationHours: durationInfo?.studyDurationHours || t.studyDurationHours || null,
+                        studyDurationMinutes: durationInfo?.studyDurationMinutes || t.studyDurationMinutes || null,
+                        studyTimeRange: durationInfo?.studyTimeRange || t.studyTimeRange || null,
+                        studyTimeStart: durationInfo?.studyTimeStart || t.studyTimeStart || null,
+                        studyTimeEnd: durationInfo?.studyTimeEnd || t.studyTimeEnd || null
+                    } : t);
+
+                    const updatedExams = (prev.exams || []).map(ex => {
+                        if (task.examId && ex.id === task.examId) {
+                            const completedCount = updatedTasks.filter(t => t.examId === ex.id && (t.completed || t.completedAt)).length;
+                            return {
+                                ...ex,
+                                completedSessionsCount: completedCount,
+                                sessionsCount: Math.max(ex.sessionsCount || 0, completedCount)
+                            };
+                        }
+                        return ex;
+                    });
+
+                    return checkAndAwardBadges({
+                        ...prev,
+                        exams: updatedExams,
+                        tasks: updatedTasks,
+                        totalPoints: prev.totalPoints + pointsDelta,
+                        weeklyPoints: prev.weeklyPoints + pointsDelta,
+                        taskStreak: newStreak,
+                        longestStreak: newLongest,
+                        currentStreakStart: newStreakStart,
+                        currentStreakEmojis: newStreakEmojis,
+                        pointsHistory: pointsDelta !== 0 ? [historyLog, ...(prev.pointsHistory || [])] : (prev.pointsHistory || []),
+                        streakHistory: newStreakHistory
+                    });
+                });
 
 
                 toggleModal('complete', false);
                 setActiveTask(null);
+                setStudyDurationHoursInput('');
+                setStudyTimeStart('');
+                setStudyTimeEnd('');
                 
                 if (pointsDelta > 0) {
                     showToast(`כל הכבוד! ${pointsDelta}+ נקודות. ${streakMessage}`, 'success');
@@ -1874,7 +2131,26 @@ function App() {
 
 
             const handleDeleteTask = (taskId) => {
-                updateUserData(prev => ({ ...prev, tasks: prev.tasks.filter(t => t.id !== taskId) }));
+                updateUserData(prev => {
+                    const taskToDelete = (prev.tasks || []).find(t => t.id === taskId);
+                    const remainingTasks = (prev.tasks || []).filter(t => t.id !== taskId);
+                    let updatedExams = prev.exams;
+                    if (taskToDelete && taskToDelete.examId) {
+                        updatedExams = (prev.exams || []).map(ex => {
+                            if (ex.id === taskToDelete.examId) {
+                                const remainingForExam = remainingTasks.filter(rt => rt.examId === ex.id);
+                                const completedForExam = remainingTasks.filter(rt => rt.examId === ex.id && (rt.completed || rt.completedAt)).length;
+                                return {
+                                    ...ex,
+                                    sessionsCount: Math.max(0, remainingForExam.length),
+                                    completedSessionsCount: completedForExam
+                                };
+                            }
+                            return ex;
+                        });
+                    }
+                    return { ...prev, tasks: remainingTasks, exams: updatedExams };
+                });
                 showToast('משימה נמחקה', 'success');
             };
 
@@ -1916,6 +2192,24 @@ function App() {
                                 updated.startTime = newStartTime;
                             } else {
                                 delete updated.startTime;
+                            }
+                            const durInput = form.elements['studyDurationHours'];
+                            if (durInput) {
+                                const rawVal = String(durInput.value || '').replace(',', '.').trim();
+                                const val = parseFloat(rawVal);
+                                if (!isNaN(val) && val > 0) {
+                                    updated.studyDurationHours = parseFloat(val.toFixed(2));
+                                    updated.studyDurationMinutes = Math.round(val * 60);
+                                    const h = Math.floor(updated.studyDurationMinutes / 60);
+                                    const m = updated.studyDurationMinutes % 60;
+                                    updated.studyTimeRange = (h > 0 && m > 0)
+                                        ? `${h} שע' ו-${m} דק'`
+                                        : (h === 1 ? 'שעה' : (h === 2 ? 'שעתיים' : (h > 0 ? `${h} שעות` : `${m} דקות`)));
+                                } else if (rawVal === '') {
+                                    updated.studyDurationHours = null;
+                                    updated.studyDurationMinutes = null;
+                                    updated.studyTimeRange = null;
+                                }
                             }
                             return updated;
                         })
@@ -2650,48 +2944,100 @@ function App() {
                 const reuseId = examPlannerData.existingExamId;
                 const examId = reuseId || ('ex_' + Date.now());
                 
-                const newTasks = examPlannerData.sessions.map((ses, idx) => ({
-                    id: 't_' + Date.now() + idx,
-                    examId: examId,
-                    subjectId: examPlannerData.subjectId,
-                    title: `למידה ל${examTitle} ב${sub?.name || 'כללי'} (מפגש ${idx+1}/${examPlannerData.sessions.length})`,
-                    lessonTopic: `הכנה למבחן: ${examTitle}`,
-                    createdAt: new Date().toISOString(),
-                    completed: false,
-                    isLessonLog: false,
-                    isExamPrep: true,
-                    givenDate: new Date().toISOString().split('T')[0],
-                    dueDate: ses.date,
-                    startTime: ses.startTime,
-                    dueTime: ses.endTime,
-                    autoPenaltyApplied: false
-                }));
-
-
                 updateUserData(prev => {
+                    let completedTasksCount = 0;
+                    let remainingTasks = prev.tasks || [];
+                    
+                    if (reuseId) {
+                        const targetSubjId = examPlannerData.subjectId;
+                        const cleanExamTitle = (examTitle || '').trim();
+                        const isTaskMatchingExam = (t) => {
+                            if (t.examId) {
+                                return String(t.examId) === String(reuseId);
+                            }
+                            if (!t.isExamPrep) return false;
+                            if (targetSubjId && t.subjectId && String(t.subjectId) !== String(targetSubjId)) return false;
+                            if (!cleanExamTitle) return false;
+                            const topic = (t.lessonTopic || '').trim();
+                            const title = (t.title || '').trim();
+                            return topic === `הכנה למבחן: ${cleanExamTitle}` || 
+                                   topic === cleanExamTitle || 
+                                   title === `ללמוד למבחן: ${cleanExamTitle}` || 
+                                   title.startsWith(`למידה ל${cleanExamTitle} ב`) ||
+                                   title.startsWith(`ללמוד ל${cleanExamTitle}`);
+                        };
+
+                        // Count completed tasks for this exam to preserve streak/points/session numbering
+                        completedTasksCount = (prev.tasks || []).filter(t => 
+                            isTaskMatchingExam(t) && (t.completed || t.completedAt)
+                        ).length;
+
+                        // Remove old uncompleted tasks for this exam so old dates and times don't remain
+                        remainingTasks = (prev.tasks || []).filter(t => 
+                            !( isTaskMatchingExam(t) && !t.completed && !t.completedAt )
+                        );
+                    }
+
+                    const newTasks = examPlannerData.sessions.map((ses, idx) => {
+                        const sessionIdx = completedTasksCount + idx + 1;
+                        const totalSessions = completedTasksCount + examPlannerData.sessions.length;
+                        return {
+                            id: 't_' + Date.now() + '_' + idx,
+                            examId: examId,
+                            subjectId: examPlannerData.subjectId,
+                            title: `למידה ל${examTitle} ב${sub?.name || 'כללי'} (מפגש ${sessionIdx}/${totalSessions})`,
+                            lessonTopic: `הכנה למבחן: ${examTitle}`,
+                            createdAt: new Date().toISOString(),
+                            completed: false,
+                            isLessonLog: false,
+                            isExamPrep: true,
+                            sessionNumber: sessionIdx,
+                            givenDate: new Date().toISOString().split('T')[0],
+                            dueDate: ses.date,
+                            startTime: ses.startTime,
+                            dueTime: ses.endTime,
+                            autoPenaltyApplied: false
+                        };
+                    });
+
                     const exams = [...(prev.exams || [])];
                     if (reuseId) {
                         return {
                             ...prev,
-                            tasks: [...prev.tasks, ...newTasks],
+                            tasks: [...remainingTasks, ...newTasks],
                             exams: exams.map(ex => ex.id === reuseId ? {
                                 ...ex,
-                                sessionsCount: (ex.sessionsCount || 0) + newTasks.length,
-                                targetHours: (ex.targetHours || 0) + examPlannerData.hours
+                                examName: examTitle,
+                                subjectId: examPlannerData.subjectId,
+                                date: examPlannerData.date,
+                                time: examPlannerData.time || ex.time || '',
+                                sessionsCount: completedTasksCount + newTasks.length,
+                                completedSessionsCount: completedTasksCount,
+                                targetHours: examPlannerData.hours,
+                                updatedAt: Date.now()
                             } : ex)
                         };
                     }
                     return {
                         ...prev,
                         tasks: [...prev.tasks, ...newTasks],
-                        exams: [...exams, { id: examId, examName: examTitle, subjectId: examPlannerData.subjectId, date: examPlannerData.date, targetHours: examPlannerData.hours, sessionsCount: examPlannerData.sessions.length, cancellations: 0 }]
+                        exams: [...exams, { 
+                            id: examId, 
+                            examName: examTitle, 
+                            subjectId: examPlannerData.subjectId, 
+                            date: examPlannerData.date, 
+                            time: examPlannerData.time || '',
+                            targetHours: examPlannerData.hours, 
+                            sessionsCount: examPlannerData.sessions.length, 
+                            completedSessionsCount: 0,
+                            cancellations: 0 
+                        }]
                     };
                 });
 
-
                 toggleModal('examPlanner', false);
                 showToast(`שובצו ${examPlannerData.sessions.length} מפגשי למידה בהצלחה! תוכלי לראות אותם במשימות. 🧠`, 'success');
-                setExamPlannerData({ step: 1, subjectId: '', examName: '', date: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '' });
+                setExamPlannerData({ step: 1, subjectId: '', examName: '', date: '', time: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '' });
             };
 
 
@@ -2700,14 +3046,17 @@ function App() {
                 const subjectId = e.target.subjectId.value;
                 const examName = e.target.examName.value;
                 const date = e.target.date.value;
+                const time = e.target.time?.value || '';
                 
                 const newExam = {
                     id: 'ex_' + Date.now(),
                     subjectId,
                     examName,
                     date,
+                    time,
                     targetHours: 0,
                     sessionsCount: 0,
+                    completedSessionsCount: 0,
                     cancellations: 0
                 };
                 
@@ -2718,6 +3067,126 @@ function App() {
                 
                 toggleModal('quickExam', false);
                 showToast('המבחן נוסף למערכת בהצלחה! 🎉', 'success');
+            };
+
+            const getNextSessionNumberForExam = (examId, tasks = activeUserData.tasks) => {
+                if (!examId) return 1;
+                const examTasks = (tasks || []).filter(t => t.examId === examId);
+                if (examTasks.length === 0) return 1;
+
+                let maxNum = 0;
+                examTasks.forEach(t => {
+                    if (typeof t.sessionNumber === 'number' && t.sessionNumber > maxNum) {
+                        maxNum = t.sessionNumber;
+                    }
+                    const match = (t.title || '').match(/סשן\s*(\d+)/) || (t.title || '').match(/מפגש\s*(\d+)/);
+                    if (match && match[1]) {
+                        const parsed = parseInt(match[1], 10);
+                        if (!isNaN(parsed) && parsed > maxNum) {
+                            maxNum = parsed;
+                        }
+                    }
+                });
+
+                if (maxNum > 0) {
+                    return maxNum + 1;
+                }
+                return examTasks.length + 1;
+            };
+
+            const handleOpenSingleSessionModal = (exam = null) => {
+                const availableExams = activeUserData.exams || [];
+                const targetExam = exam || (availableExams.length > 0 ? availableExams[0] : null);
+                const nextNum = targetExam ? getNextSessionNumberForExam(targetExam.id, activeUserData.tasks) : 1;
+                const defaultTitle = targetExam 
+                    ? `ללמוד למבחן: ${targetExam.examName || 'מבחן'} - סשן ${nextNum}` 
+                    : `ללמוד למבחן - סשן 1`;
+                
+                setSingleExamSessionData({
+                    examId: targetExam ? targetExam.id : '',
+                    customExamName: '',
+                    customSubjectId: targetExam ? targetExam.subjectId : (activeUserData.subjects?.[0]?.id || ''),
+                    title: defaultTitle
+                });
+                toggleModal('singleExamSession', true);
+            };
+
+            const handleCreateSingleExamSession = (e) => {
+                e.preventDefault();
+                const todayStr = new Date().toISOString().split('T')[0];
+                const { examId, customExamName, customSubjectId, title } = singleExamSessionData;
+                
+                const selectedExam = (activeUserData.exams || []).find(ex => ex.id === examId);
+                const examTitle = selectedExam ? (selectedExam.examName || 'מבחן') : (customExamName.trim() || 'מבחן');
+                const subjectId = selectedExam ? selectedExam.subjectId : (customSubjectId || activeUserData.subjects?.[0]?.id || '');
+                
+                const nextNum = selectedExam ? getNextSessionNumberForExam(selectedExam.id, activeUserData.tasks) : 1;
+                let sessionTitle = (title || '').trim();
+                if (!sessionTitle) {
+                    sessionTitle = selectedExam 
+                        ? `ללמוד למבחן: ${examTitle} - סשן ${nextNum}` 
+                        : `ללמוד למבחן - סשן 1`;
+                }
+
+                // Study session can be done anytime until midnight (00:00 / 23:59) before the exam
+                let sessionDueDate = todayStr;
+                if (selectedExam && selectedExam.date) {
+                    const parts = selectedExam.date.split('-');
+                    if (parts.length === 3) {
+                        const year = parseInt(parts[0], 10);
+                        const month = parseInt(parts[1], 10) - 1;
+                        const day = parseInt(parts[2], 10);
+                        const examDateObj = new Date(year, month, day);
+                        examDateObj.setDate(examDateObj.getDate() - 1);
+                        const y = examDateObj.getFullYear();
+                        const m = String(examDateObj.getMonth() + 1).padStart(2, '0');
+                        const d = String(examDateObj.getDate()).padStart(2, '0');
+                        const eveDate = `${y}-${m}-${d}`;
+                        sessionDueDate = eveDate >= todayStr ? eveDate : selectedExam.date;
+                    }
+                }
+
+                const newSingleTask = {
+                    id: 't_' + Date.now(),
+                    examId: selectedExam ? selectedExam.id : null,
+                    subjectId: subjectId,
+                    title: sessionTitle,
+                    lessonTopic: `הכנה למבחן: ${examTitle}`,
+                    createdAt: new Date().toISOString(),
+                    completed: false,
+                    isLessonLog: false,
+                    isExamPrep: true,
+                    isFlexibleExamSession: true,
+                    sessionNumber: nextNum,
+                    rewardPoints: 3,
+                    givenDate: todayStr,
+                    dueDate: sessionDueDate,
+                    startTime: '',
+                    dueTime: '23:59',
+                    autoPenaltyApplied: false
+                };
+
+                updateUserData(prev => {
+                    const exams = [...(prev.exams || [])];
+                    if (selectedExam) {
+                        const existingExamTasks = (prev.tasks || []).filter(t => t.examId === selectedExam.id);
+                        return {
+                            ...prev,
+                            tasks: [newSingleTask, ...(prev.tasks || [])],
+                            exams: exams.map(ex => ex.id === selectedExam.id ? {
+                                ...ex,
+                                sessionsCount: Math.max(ex.sessionsCount || 0, existingExamTasks.length + 1)
+                            } : ex)
+                        };
+                    }
+                    return {
+                        ...prev,
+                        tasks: [newSingleTask, ...(prev.tasks || [])]
+                    };
+                });
+
+                toggleModal('singleExamSession', false);
+                showToast(`סשן ${nextNum} נוצר בהצלחה! 3 נקודות יוענקו בסיומו 🎯`, 'success');
             };
 
             const handleDeleteExam = (examId) => {
@@ -2740,6 +3209,106 @@ function App() {
                 showToast(shouldArchive ? 'המבחן הועבר לארכיון בהצלחה 📦' : 'המבחן הוחזר למבחנים קרובים 🗓️', 'success');
             };
 
+            const handleSaveEditedExam = (updatedFields) => {
+                if (!editingExam) return;
+                const examId = editingExam.id;
+
+                let updatedCount = 0;
+                updateUserData(prev => {
+                    const originalExam = (prev.exams || []).find(ex => String(ex.id) === String(examId));
+                    const oldExamName = (originalExam?.examName || editingExam.originalExamName || editingExam.examName || '').trim();
+                    const oldExamDate = originalExam?.date || editingExam.originalDate || editingExam.date;
+                    const oldExamTime = originalExam?.time || editingExam.originalTime || editingExam.time || '';
+                    const oldSubjectId = originalExam?.subjectId || editingExam.originalSubjectId || editingExam.subjectId;
+
+                    const newTitle = (updatedFields.examName || '').trim() || oldExamName || 'מבחן';
+                    const newDate = updatedFields.date || oldExamDate;
+                    const newTime = updatedFields.time !== undefined ? updatedFields.time : (editingExam.time || oldExamTime || '');
+                    const newSubjectId = updatedFields.subjectId || oldSubjectId;
+
+                    const updatedExams = (prev.exams || []).map(ex => {
+                        if (String(ex.id) !== String(examId)) return ex;
+                        return {
+                            ...ex,
+                            ...updatedFields,
+                            examName: newTitle,
+                            date: newDate,
+                            time: newTime,
+                            subjectId: newSubjectId,
+                            updatedAt: Date.now()
+                        };
+                    });
+
+                    const oldSubObj = (prev.subjects || []).find(s => s.id === oldSubjectId);
+                    const newSubObj = (prev.subjects || []).find(s => s.id === newSubjectId);
+
+                    const syncResult = syncExamStudyTasks(
+                        examId,
+                        newDate,
+                        newTitle,
+                        newSubjectId,
+                        prev.tasks || [],
+                        prev.scheduleSettings || [],
+                        { 
+                            oldName: oldExamName, 
+                            oldDate: oldExamDate, 
+                            newTime: newTime,
+                            oldSubjectId: oldSubjectId,
+                            oldSubjectName: oldSubObj?.name,
+                            newSubjectName: newSubObj?.name
+                        }
+                    );
+                    updatedCount = syncResult.updatedCount;
+
+                    return {
+                        ...prev,
+                        exams: updatedExams,
+                        tasks: syncResult.updatedTasks
+                    };
+                });
+
+                setEditingExam(null);
+                if (updatedCount > 0) {
+                    showToast(`פרטי המבחן ו-${updatedCount} מפגשי למידה עודכנו וסונכרנו בהצלחה! 🎯`, 'success');
+                } else {
+                    showToast('פרטי המבחן עודכנו בהצלחה! ✏️', 'success');
+                }
+            };
+
+            const handleResyncExamStudySessions = (exam) => {
+                if (!exam) return;
+                let syncCount = 0;
+                updateUserData(prev => {
+                    const subObj = (prev.subjects || []).find(s => s.id === exam.subjectId);
+                    const syncResult = syncExamStudyTasks(
+                        exam.id,
+                        exam.date,
+                        exam.examName,
+                        exam.subjectId,
+                        prev.tasks || [],
+                        prev.scheduleSettings || [],
+                        { 
+                            oldName: exam.examName, 
+                            oldDate: exam.date, 
+                            newTime: exam.time, 
+                            oldSubjectId: exam.subjectId,
+                            oldSubjectName: subObj?.name,
+                            newSubjectName: subObj?.name,
+                            forceRecalculate: true 
+                        }
+                    );
+                    syncCount = syncResult.updatedCount;
+                    return {
+                        ...prev,
+                        tasks: syncResult.updatedTasks
+                    };
+                });
+                if (syncCount > 0) {
+                    showToast(`שעות ותאריכי הלמידה ל-${exam.examName || 'מבחן'} רועננו וסונכרנו בהצלחה (${syncCount} מפגשים)! 🎯`, 'success');
+                } else {
+                    showToast(`כל מפגשי הלמידה ל-${exam.examName || 'מבחן'} כבר מסונכרנים ללו״ז! ✨`, 'info');
+                }
+            };
 
             const handleAddExamToCalendar = (exam) => {
                 const sub = activeUserData.subjects.find(s => s.id === exam.subjectId);
@@ -2747,7 +3316,12 @@ function App() {
                 const title = `מבחן: ${exam.examName || 'מבחן'} ב${subjectName}`;
                 
                 const dueDate = new Date(exam.date);
-                dueDate.setHours(8, 0, 0);
+                if (exam.time) {
+                    const [h, m] = exam.time.split(':');
+                    dueDate.setHours(parseInt(h, 10) || 8, parseInt(m, 10) || 0, 0);
+                } else {
+                    dueDate.setHours(8, 0, 0);
+                }
 
 
                 const formatICSDate = (date) => {
@@ -3123,16 +3697,20 @@ function App() {
                                 <p className="text-sm text-stone-500 font-medium">שבוע: {weeklyReportData.startDate} עד {weeklyReportData.endDate}</p>
                             </div>
                             
-                            <div className="flex gap-4 mb-8">
-                                <div className="flex-1 bg-stone-100 p-5 rounded-2xl text-center border border-stone-200">
+                            <div className="grid grid-cols-4 gap-4 mb-8">
+                                <div className="bg-stone-100 p-5 rounded-2xl text-center border border-stone-200">
                                     <div className="text-sm text-stone-500 font-bold mb-1 uppercase">משימות הושלמו</div>
                                     <div className="text-3xl font-black text-emerald-600">{weeklyReportData.completedHW.length}</div>
                                 </div>
-                                <div className="flex-1 bg-stone-100 p-5 rounded-2xl text-center border border-stone-200">
-                                    <div className="text-sm text-stone-500 font-bold mb-1 uppercase">סשנים למבחנים</div>
-                                    <div className="text-3xl font-black text-indigo-600">{weeklyReportData.examPrepDone.length}</div>
+                                <div className="bg-stone-100 p-5 rounded-2xl text-center border border-stone-200">
+                                    <div className="text-sm text-stone-500 font-bold mb-1 uppercase">שעות למידה ⏳</div>
+                                    <div className="text-3xl font-black text-indigo-600">{weeklyReportData.totalStudyHours || 0}</div>
                                 </div>
-                                <div className="flex-1 bg-stone-100 p-5 rounded-2xl text-center border border-stone-200">
+                                <div className="bg-stone-100 p-5 rounded-2xl text-center border border-stone-200">
+                                    <div className="text-sm text-stone-500 font-bold mb-1 uppercase">סשנים למבחנים</div>
+                                    <div className="text-3xl font-black text-amber-600">{weeklyReportData.examPrepDone.length}</div>
+                                </div>
+                                <div className="bg-stone-100 p-5 rounded-2xl text-center border border-stone-200">
                                     <div className="text-sm text-stone-500 font-bold mb-1 uppercase">נקודות השבוע</div>
                                     <div className="text-3xl font-black text-purple-600">{weeklyReportData.totalPointsGained}</div>
                                 </div>
@@ -3145,7 +3723,7 @@ function App() {
                                     <ul className="list-disc list-inside space-y-2 text-base">
                                         {weeklyReportData.completedHW.map(t => {
                                             const sub = activeUserData.subjects.find(s=>s.id === t.subjectId);
-                                            return <li key={t.id}><strong>{sub ? sub.name : 'כללי'}:</strong> {t.title} <span className="text-stone-500 text-sm font-medium mr-1">(דירוג הבנה: {t.understandingRating}/5)</span></li>
+                                            return <li key={t.id}><strong>{sub ? sub.name : 'כללי'}:</strong> {t.title} <span className="text-stone-500 text-sm font-medium mr-1">(דירוג הבנה: {t.understandingRating}/5){t.studyTimeRange ? ` • ⏳ ${t.studyTimeRange}` : ''}</span></li>
                                         })}
                                     </ul>
                                 ) : <p className="text-base text-stone-500 italic">לא הושלמו משימות השבוע.</p>}
@@ -3215,6 +3793,11 @@ function App() {
                         if (analyticsTimeFilter === 'all') return true;
                         const taskDate = getTaskDate(t);
                         if (!taskDate || isNaN(taskDate.getTime())) return false;
+                        if (analyticsTimeFilter === 'last7') {
+                            const sevenDaysAgo = new Date();
+                            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                            return taskDate >= sevenDaysAgo;
+                        }
                         if (analyticsTimeFilter === 'last30') {
                             const thirtyDaysAgo = new Date();
                             thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -3228,6 +3811,11 @@ function App() {
                         if (!ex.date) return false;
                         const exDate = new Date(ex.date);
                         if (!exDate || isNaN(exDate.getTime())) return false;
+                        if (analyticsTimeFilter === 'last7') {
+                            const sevenDaysAgo = new Date();
+                            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                            return exDate >= sevenDaysAgo;
+                        }
                         if (analyticsTimeFilter === 'last30') {
                             const thirtyDaysAgo = new Date();
                             thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -3241,9 +3829,15 @@ function App() {
                     const exams = rawExams.filter(isExamInFilter);
                     const printFilterLabel = analyticsTimeFilter === 'all' 
                         ? 'כל הזמנים' 
-                        : analyticsTimeFilter === 'last30' 
-                            ? '30 ימים אחרונים' 
-                            : formatMonthLabel(analyticsTimeFilter);
+                        : analyticsTimeFilter === 'last7'
+                            ? 'השבוע (7 ימים אחרונים)'
+                            : analyticsTimeFilter === 'last30' 
+                                ? '30 ימים אחרונים' 
+                                : formatMonthLabel(analyticsTimeFilter);
+
+                    const printTasksWithHours = completedTasks.filter(t => t.studyDurationHours && !isNaN(Number(t.studyDurationHours)));
+                    const printTotalStudyHoursNum = printTasksWithHours.reduce((sum, t) => sum + Number(t.studyDurationHours), 0);
+                    const printTotalStudyHours = printTotalStudyHoursNum > 0 ? parseFloat(printTotalStudyHoursNum.toFixed(1)) : 0;
 
                     const onTimeCount = completedTasks.filter(t => {
                         if (!t.dueDate || !t.dueTime || !t.completedAt) return true;
@@ -3295,10 +3889,14 @@ function App() {
                                 <p className="text-base font-bold text-stone-600">תלמידה: {activeUserData.name} • טווח נתונים: {printFilterLabel}</p>
                             </div>
 
-                            <div className="grid grid-cols-4 gap-3 mb-6">
+                            <div className="grid grid-cols-5 gap-2.5 mb-6">
                                 <div className="bg-stone-50 p-4 rounded-xl text-center border border-stone-200">
                                     <div className="text-xs text-stone-500 font-bold mb-1 uppercase">משימות שהוגשו</div>
                                     <div className="text-2xl font-black text-purple-700">{completedTasks.length}</div>
+                                </div>
+                                <div className="bg-stone-50 p-4 rounded-xl text-center border border-stone-200">
+                                    <div className="text-xs text-stone-500 font-bold mb-1 uppercase">שעות למידה ⏳</div>
+                                    <div className="text-2xl font-black text-indigo-600">{printTotalStudyHours > 0 ? `${printTotalStudyHours} שע'` : '0'}</div>
                                 </div>
                                 <div className="bg-stone-50 p-4 rounded-xl text-center border border-stone-200">
                                     <div className="text-xs text-stone-500 font-bold mb-1 uppercase">הגשה בזמן</div>
@@ -4047,7 +4645,27 @@ function App() {
                                 <div className="w-10 h-10 bg-gradient-to-br from-purple-100 to-rose-100 rounded-xl flex items-center justify-center text-xl shadow-sm">✨</div>
                                 <div>
                                     <h1 className="text-lg font-bold text-stone-800 leading-tight tracking-tight">StudyStreak</h1>
-                                    <span className="text-xs text-stone-500 font-medium block mt-0.5">היי, {activeUserData.name}</span>
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                        <span className="text-xs text-stone-500 font-medium">היי, {activeUserData.name}</span>
+                                        <button 
+                                            onClick={() => setIsSyncDiagnosticsOpen(true)}
+                                            className={`text-[10px] px-2 py-0.5 rounded-full font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                                                syncState === 'synced' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100' :
+                                                syncState === 'syncing' ? 'bg-amber-50 text-amber-700 border border-amber-200 animate-pulse' :
+                                                syncState === 'offline' ? 'bg-stone-100 text-stone-600 border border-stone-200 hover:bg-stone-200' :
+                                                'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'
+                                            }`}
+                                            title="סטטוס סנכרון ענן - לחצי לבדיקה ואבחון">
+                                            <span className={`w-1.5 h-1.5 rounded-full ${
+                                                syncState === 'synced' ? 'bg-emerald-500' :
+                                                syncState === 'syncing' ? 'bg-amber-500' :
+                                                syncState === 'offline' ? 'bg-stone-400' : 'bg-rose-500'
+                                            }`}></span>
+                                            {syncState === 'synced' ? 'מסונכרן' :
+                                             syncState === 'syncing' ? 'מסנכרן...' :
+                                             syncState === 'offline' ? 'מצב מקומי' : 'שגיאת סנכרון'}
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -4083,6 +4701,24 @@ function App() {
                             <div className="font-bold text-lg text-stone-800 tracking-tight">StudyStreak</div>
                         </div>
                         <div className="flex gap-2 items-center">
+                            <button 
+                                onClick={() => setIsSyncDiagnosticsOpen(true)}
+                                className={`text-[10px] px-2.5 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1 active:scale-95 cursor-pointer ${
+                                    syncState === 'synced' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                                    syncState === 'syncing' ? 'bg-amber-50 text-amber-700 border border-amber-200 animate-pulse' :
+                                    syncState === 'offline' ? 'bg-stone-100 text-stone-600 border border-stone-200' :
+                                    'bg-rose-50 text-rose-700 border border-rose-200'
+                                }`}
+                                title="סטטוס סנכרון ענן">
+                                <span className={`w-1.5 h-1.5 rounded-full ${
+                                    syncState === 'synced' ? 'bg-emerald-500' :
+                                    syncState === 'syncing' ? 'bg-amber-500' :
+                                    syncState === 'offline' ? 'bg-stone-400' : 'bg-rose-500'
+                                }`}></span>
+                                <span>{syncState === 'synced' ? 'מסונכרן' :
+                                       syncState === 'syncing' ? 'מסנכרן...' :
+                                       syncState === 'offline' ? 'מקומי' : 'שגיאה'}</span>
+                            </button>
                             <button onClick={()=>toggleModal('streakHistory', true)} className="bg-purple-50 text-purple-700 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95">
                                 <span>🔥</span> {activeUserData.taskStreak}
                             </button>
@@ -4112,6 +4748,23 @@ function App() {
                                     <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors active:scale-95" onClick={() => toggleModal('pointsHistory', true)}>
                                         <div className="text-stone-400 text-xs font-semibold mb-2">נקודות השבוע</div>
                                         <div className="text-3xl font-bold text-purple-600 text-right" dir="ltr">{activeUserData.weeklyPoints}</div>
+                                        {(() => {
+                                            const weekHours = (activeUserData.tasks || [])
+                                                .filter(t => {
+                                                    if (!t.completed || !t.studyDurationHours) return false;
+                                                    const d = t.completedAt ? new Date(t.completedAt) : (t.dueDate ? new Date(t.dueDate) : null);
+                                                    if (!d) return false;
+                                                    const sevenDaysAgo = new Date();
+                                                    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                                                    return d >= sevenDaysAgo;
+                                                })
+                                                .reduce((sum, t) => sum + Number(t.studyDurationHours), 0);
+                                            return weekHours > 0 ? (
+                                                <div className="text-[11px] font-bold text-indigo-600 mt-1.5 flex items-center gap-1">
+                                                    <span>⏳</span> {parseFloat(weekHours.toFixed(1))} שעות למידה
+                                                </div>
+                                            ) : null;
+                                        })()}
                                     </div>
                                     <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors active:scale-95" onClick={() => toggleModal('pointsHistory', true)}>
                                         <div className="text-stone-400 text-xs font-semibold mb-2">סה"כ נקודות</div>
@@ -4190,7 +4843,7 @@ function App() {
                                                         {task.lessonTopic && <div className="text-sm text-stone-500 mt-1">{task.lessonTopic}</div>}
                                                     </div>
                                                     <div className="flex gap-2 w-full mt-1 items-center">
-                                                        <button onClick={() => { setActiveTask(task); setLateReason(''); setOtherLateReason(''); toggleModal('complete', true); }} className={`flex-1 border px-4 py-3 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-2 active:scale-95 shadow-xs ${isLate ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200'}`}>
+                                                        <button onClick={() => handleOpenCompleteModal(task)} className={`flex-1 border px-4 py-3 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-2 active:scale-95 shadow-xs ${isLate ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200'}`}>
                                                             <IconCheck className="w-4 h-4 text-emerald-600"/> {isLate ? 'הגשה באיחור' : 'סיימתי!'}
                                                         </button>
                                                         <button onClick={() => setTaskActionsMenu(task)} className="px-4 py-3 bg-stone-50 hover:bg-stone-100 text-stone-600 border border-stone-200 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-1.5 active:scale-95 shadow-xs" title="אפשרויות נוספות">
@@ -4242,9 +4895,11 @@ function App() {
                                         <h2 className="text-xl font-bold text-stone-800 tracking-tight">רשימת משימות ושיעורי בית</h2>
                                         <p className="text-sm text-stone-500 mt-1">מסודרות לפי רמת הדחיפות.</p>
                                     </div>
-                                    <button onClick={() => { setTaskFormHasHW(true); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="bg-stone-800 text-white px-5 py-3 rounded-2xl text-sm font-bold shadow-md hover:bg-stone-900 transition-colors flex items-center justify-center gap-2 active:scale-95">
-                                        <IconPlus className="w-4 h-4"/> הוספת חדש
-                                    </button>
+                                    <div className="flex items-center gap-2.5 flex-wrap">
+                                        <button onClick={() => { setTaskFormHasHW(true); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="bg-stone-800 text-white px-5 py-3 rounded-2xl text-sm font-bold shadow-md hover:bg-stone-900 transition-colors flex items-center justify-center gap-2 active:scale-95">
+                                            <IconPlus className="w-4 h-4"/> הוספת חדש
+                                        </button>
+                                    </div>
                                 </div>
                                 
                                 {taskSubjects.length > 0 && (
@@ -4284,7 +4939,12 @@ function App() {
                                                             </span>
                                                             {task.isExamPrep && (
                                                                 <span className="text-[10px] font-bold text-white bg-gradient-to-r from-indigo-500 to-purple-500 px-2 py-1 rounded-lg shadow-sm flex items-center gap-1">
-                                                                    <span>🎯</span> סשן למידה
+                                                                    <span>🎯</span> {task.sessionNumber ? `סשן למידה ${task.sessionNumber}` : 'סשן למידה'}
+                                                                </span>
+                                                            )}
+                                                            {task.rewardPoints && (
+                                                                <span className="text-[10px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-lg shadow-xs flex items-center gap-1">
+                                                                    <span>⚡</span> +{task.rewardPoints} נק'
                                                                 </span>
                                                             )}
                                                             {task.remindersEnabled && !isTaskDone && (
@@ -4349,6 +5009,11 @@ function App() {
                                                                 <span className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1 shadow-sm ${(task.pointsEarned ?? 0) > 0 ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-rose-50 text-rose-700 border border-rose-100'}`}>
                                                                     {(task.pointsEarned ?? 0) > 0 ? '+'+task.pointsEarned : (task.pointsEarned ?? 0)} נק'
                                                                 </span>
+                                                                {task.studyTimeRange && (
+                                                                    <span className="bg-indigo-50 border border-indigo-100 text-indigo-700 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1 shadow-sm">
+                                                                        ⏳ {task.studyTimeRange}
+                                                                    </span>
+                                                                )}
                                                                 {task.hardExercises && <span className="text-rose-700 font-semibold bg-rose-50 px-3 py-1.5 rounded-lg border border-rose-100 shadow-sm">קשה: {task.hardExercises}</span>}
                                                             </div>
                                                         )}
@@ -4357,7 +5022,7 @@ function App() {
                                                     <div className="flex md:flex-col gap-2 w-full md:w-44 shrink-0 border-t md:border-t-0 md:border-r border-stone-100 pt-3 md:pt-0 md:pr-4">
                                                         {!isTaskDone ? (
                                                             <div className="flex gap-2 w-full items-center">
-                                                                <button onClick={() => { setActiveTask(task); setLateReason(''); setOtherLateReason(''); toggleModal('complete', true); }} className={`flex-1 border px-3 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-1.5 active:scale-95 shadow-xs ${isLate ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200'}`}>
+                                                                <button onClick={() => handleOpenCompleteModal(task)} className={`flex-1 border px-3 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-1.5 active:scale-95 shadow-xs ${isLate ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200'}`}>
                                                                     <IconCheck className="w-4 h-4 text-emerald-600"/> {isLate ? 'הגשה באיחור' : 'סיימתי!'}
                                                                 </button>
                                                                 <button onClick={() => setTaskActionsMenu(task)} className="px-3 py-2.5 bg-stone-50 hover:bg-stone-100 text-stone-600 border border-stone-200 rounded-xl transition-all font-bold text-sm flex items-center justify-center gap-1 active:scale-95 shadow-xs" title="אפשרויות נוספות">
@@ -4515,9 +5180,7 @@ function App() {
                                                                 onChange={async (e) => {
                                                                     const files = Array.from(e.target.files || []);
                                                                     if (files.length === 0) return;
-                                                                    for (const f of files) {
-                                                                        await handleQuickAddAttachmentToTask(task, f, 'board');
-                                                                    }
+                                                                    await handleQuickAddAttachmentsToTask(task, files, 'board');
                                                                     e.target.value = '';
                                                                 }} 
                                                             />
@@ -4534,9 +5197,7 @@ function App() {
                                                                     onChange={async (e) => {
                                                                         const files = Array.from(e.target.files || []);
                                                                         if (files.length === 0) return;
-                                                                        for (const f of files) {
-                                                                            await handleQuickAddAttachmentToTask(task, f, 'homework');
-                                                                        }
+                                                                        await handleQuickAddAttachmentsToTask(task, files, 'homework');
                                                                         e.target.value = '';
                                                                     }} 
                                                                 />
@@ -5011,13 +5672,16 @@ function App() {
                                             <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 relative z-10 animate-[fadeIn_0.2s_ease-out]">
                                                 {upcomingExams.map(exam => {
                                                     const sub = activeUserData.subjects.find(s=>s.id === exam.subjectId);
-                                                    const examCountdown = getExamCountdown(exam.date);
+                                                    const examCountdown = getExamCountdown(exam.date, exam.time);
                                                     return (
                                                         <div key={exam.id} className="p-5 rounded-3xl border border-indigo-100 bg-white shadow-sm hover:shadow-md transition-all flex flex-col justify-between">
                                                             <div>
                                                                 <div className="flex justify-between items-start mb-2 gap-2 flex-wrap">
                                                                     <div className="flex items-center gap-2 flex-wrap">
-                                                                        <div className="text-xs font-bold text-stone-500" dir="ltr">{new Date(exam.date).toLocaleDateString('he-IL')}</div>
+                                                                        <div className="text-xs font-bold text-stone-500 flex items-center gap-1.5" dir="ltr">
+                                                                            <span>{new Date(exam.date).toLocaleDateString('he-IL')}</span>
+                                                                            {exam.time && <span className="text-stone-700 font-extrabold">• ⏰ {exam.time}</span>}
+                                                                        </div>
                                                                         {examCountdown && (
                                                                             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${examCountdown.badgeClass}`}>
                                                                                 {examCountdown.text}
@@ -5033,9 +5697,56 @@ function App() {
                                                                 <div className="font-bold text-lg leading-tight text-stone-800">
                                                                     {exam.examName || 'מבחן'} ב{sub?.name || 'כללי'}
                                                                 </div>
-                                                                <div className="text-xs text-stone-500 mt-2 bg-stone-50 inline-block px-2 py-1 rounded-lg border border-stone-200">
-                                                                    תוכננו {exam.sessionsCount || 0} מפגשים ({exam.targetHours || 0} שעות)
-                                                                </div>
+                                                                {(() => {
+                                                                    const examTasks = (activeUserData.tasks || []).filter(t => t.examId === exam.id && !t.givenUp);
+                                                                    const completedSessions = examTasks.filter(t => t.completed || t.completedAt).length;
+                                                                    const openSessions = examTasks.filter(t => !t.completed && !t.completedAt).length;
+                                                                    const totalSessions = Math.max(exam.sessionsCount || 0, completedSessions + openSessions);
+
+                                                                    if (exam.targetHours > 0) {
+                                                                        if (completedSessions > 0) {
+                                                                            return (
+                                                                                <div className="text-xs font-bold mt-2 bg-emerald-50 text-emerald-800 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-emerald-200 shadow-2xs">
+                                                                                    <span>🎯</span>
+                                                                                    <span>הושלמו {completedSessions}/{totalSessions} מפגשים ({exam.targetHours} שעות)</span>
+                                                                                </div>
+                                                                            );
+                                                                        }
+                                                                        return (
+                                                                            <div className="text-xs text-stone-500 mt-2 bg-stone-50 inline-block px-2 py-1 rounded-lg border border-stone-200">
+                                                                                תוכננו {totalSessions} מפגשים ({exam.targetHours} שעות)
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    if (completedSessions > 0) {
+                                                                        return (
+                                                                            <div className="text-xs font-bold mt-2 bg-emerald-50 text-emerald-800 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-emerald-200 shadow-2xs">
+                                                                                <span>{openSessions === 0 ? '✅' : '🎯'}</span>
+                                                                                <span>
+                                                                                    {openSessions > 0 
+                                                                                        ? (completedSessions === 1 ? `הושלם סשן 1 (${openSessions} בתהליך)` : `הושלמו ${completedSessions} סשנים (${openSessions} בתהליך)`)
+                                                                                        : (completedSessions === 1 ? 'הושלם סשן 1 למבחן' : `הושלמו ${completedSessions} סשנים למבחן`)}
+                                                                                </span>
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    if (openSessions > 0) {
+                                                                        return (
+                                                                            <div className="text-xs font-bold mt-2 bg-amber-50 text-amber-900 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-200 shadow-2xs">
+                                                                                <span>⚡</span>
+                                                                                <span>{openSessions === 1 ? 'תוכנן סשן למידה 1' : `תוכננו ${openSessions} סשני למידה`}</span>
+                                                                            </div>
+                                                                        );
+                                                                    }
+
+                                                                    return (
+                                                                        <div className="text-xs text-stone-400 mt-2 bg-stone-50 inline-block px-2 py-1 rounded-lg border border-stone-200">
+                                                                            ללא תוכנית שעות
+                                                                        </div>
+                                                                    );
+                                                                })()}
                                                             </div>
 
                                                             <div className="flex gap-2 w-full mt-4 pt-3 border-t border-stone-100 items-center">
@@ -5052,7 +5763,7 @@ function App() {
                                                                 )}
                                                                 <button 
                                                                     onClick={() => setExamActionsMenu(exam)} 
-                                                                    className="px-4 py-2.5 bg-stone-50 hover:bg-stone-100 text-stone-600 border border-stone-200 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-1.5 active:scale-95 shadow-xs" 
+                                                                    className="px-3.5 py-2.5 bg-stone-50 hover:bg-stone-100 text-stone-600 border border-stone-200 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-1.5 active:scale-95 shadow-xs" 
                                                                     title="אפשרויות נוספות">
                                                                     <span className="text-base font-black leading-none">⋯</span>
                                                                     <span className="text-xs">אפשרויות</span>
@@ -5160,7 +5871,7 @@ function App() {
                                                                         <div className="flex justify-between items-start mb-2 gap-2 flex-wrap">
                                                                             <div className="flex items-center gap-1.5 flex-wrap">
                                                                                 <span className="text-[11px] font-bold text-stone-500 bg-white px-2 py-0.5 rounded-lg border border-stone-200" dir="ltr">
-                                                                                    {new Date(exam.date).toLocaleDateString('he-IL')}
+                                                                                    {new Date(exam.date).toLocaleDateString('he-IL')}{exam.time ? ` • ⏰ ${exam.time}` : ''}
                                                                                 </span>
                                                                                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-100">
                                                                                     {pastLabel}
@@ -5335,9 +6046,7 @@ function App() {
                                                                     onChange={async (e) => {
                                                                         const files = Array.from(e.target.files || []);
                                                                         if (files.length === 0) return;
-                                                                        for (const f of files) {
-                                                                            await handleQuickAddAttachmentToTask(t, f, 'homework');
-                                                                        }
+                                                                        await handleQuickAddAttachmentsToTask(t, files, 'homework');
                                                                         e.target.value = '';
                                                                     }} 
                                                                 />
@@ -5406,6 +6115,11 @@ function App() {
                                 if (analyticsTimeFilter === 'all') return true;
                                 const taskDate = getTaskDate(t);
                                 if (!taskDate || isNaN(taskDate.getTime())) return false;
+                                if (analyticsTimeFilter === 'last7') {
+                                    const sevenDaysAgo = new Date();
+                                    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                                    return taskDate >= sevenDaysAgo;
+                                }
                                 if (analyticsTimeFilter === 'last30') {
                                     const thirtyDaysAgo = new Date();
                                     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -5420,6 +6134,11 @@ function App() {
                                 if (!ex.date) return false;
                                 const exDate = new Date(ex.date);
                                 if (!exDate || isNaN(exDate.getTime())) return false;
+                                if (analyticsTimeFilter === 'last7') {
+                                    const sevenDaysAgo = new Date();
+                                    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                                    return exDate >= sevenDaysAgo;
+                                }
                                 if (analyticsTimeFilter === 'last30') {
                                     const thirtyDaysAgo = new Date();
                                     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -5473,12 +6192,20 @@ function App() {
                                 const subTasks = completedTasks.filter(t => !t.isLessonLog && t.subjectId === sub.id && t.understandingRating);
                                 const ratings = subTasks.map(t => t.understandingRating);
                                 const avg = ratings.length > 0 ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1) : null;
+                                const subTasksWithHours = completedTasks.filter(t => !t.isLessonLog && t.subjectId === sub.id && t.studyDurationHours);
+                                const subHours = subTasksWithHours.reduce((sum, t) => sum + Number(t.studyDurationHours), 0);
                                 return {
                                     ...sub,
                                     completedCount: subTasks.length,
-                                    avgRating: avg ? parseFloat(avg) : null
+                                    avgRating: avg ? parseFloat(avg) : null,
+                                    totalStudyHours: subHours > 0 ? parseFloat(subHours.toFixed(1)) : 0
                                 };
                             }).filter(s => s.completedCount > 0).sort((a, b) => (b.avgRating || 0) - (a.avgRating || 0));
+
+                            const tasksWithDuration = completedTasks.filter(t => t.studyDurationHours && !isNaN(Number(t.studyDurationHours)));
+                            const totalStudyHoursNum = tasksWithDuration.reduce((sum, t) => sum + Number(t.studyDurationHours), 0);
+                            const totalStudyHours = totalStudyHoursNum > 0 ? parseFloat(totalStudyHoursNum.toFixed(1)) : 0;
+                            const avgHoursPerSession = tasksWithDuration.length > 0 ? (totalStudyHoursNum / tasksWithDuration.length).toFixed(1) : null;
 
                             const allRatings = completedTasks.filter(t => !t.isLessonLog && t.understandingRating).map(t => t.understandingRating);
                             const overallAvgRating = allRatings.length > 0 ? (allRatings.reduce((a, b) => a + b, 0) / allRatings.length).toFixed(1) : null;
@@ -5488,9 +6215,11 @@ function App() {
 
                             const currentFilterLabel = analyticsTimeFilter === 'all' 
                                 ? 'כל הזמנים 🌟' 
-                                : analyticsTimeFilter === 'last30' 
-                                    ? '30 ימים אחרונים ⏱️' 
-                                    : `חודש ${formatMonthLabel(analyticsTimeFilter)} 📅`;
+                                : analyticsTimeFilter === 'last7'
+                                    ? 'השבוע (7 ימים אחרונים) 🗓️'
+                                    : analyticsTimeFilter === 'last30' 
+                                        ? '30 ימים אחרונים ⏱️' 
+                                        : `חודש ${formatMonthLabel(analyticsTimeFilter)} 📅`;
 
                             return (
                                 <div className="space-y-6 max-w-5xl mx-auto animate-[fadeIn_0.3s_ease-out]">
@@ -5536,6 +6265,15 @@ function App() {
                                                 הכל (כל הזמנים) 🌟
                                             </button>
                                             <button 
+                                                onClick={() => setAnalyticsTimeFilter('last7')}
+                                                className={`px-3.5 py-1.5 rounded-2xl text-xs md:text-sm font-bold transition-all active:scale-95 ${
+                                                    analyticsTimeFilter === 'last7' 
+                                                        ? 'bg-purple-600 text-white shadow-sm shadow-purple-200' 
+                                                        : 'bg-stone-100 hover:bg-stone-200 text-stone-700'
+                                                }`}>
+                                                השבוע (7 ימים) 🗓️
+                                            </button>
+                                            <button 
                                                 onClick={() => setAnalyticsTimeFilter('last30')}
                                                 className={`px-3.5 py-1.5 rounded-2xl text-xs md:text-sm font-bold transition-all active:scale-95 ${
                                                     analyticsTimeFilter === 'last30' 
@@ -5573,11 +6311,18 @@ function App() {
                                         </div>
                                     </div>
 
-                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5 md:gap-4">
                                         <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] border border-stone-100">
                                             <div className="text-stone-400 text-xs font-semibold mb-1">סה"כ משימות שהושלמו</div>
                                             <div className="text-2xl md:text-3xl font-black text-stone-800">{completedTasks.length}</div>
                                             <div className="text-[11px] text-emerald-600 font-bold mt-1">מתוכן {onTimeCount} בזמן!</div>
+                                        </div>
+                                        <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] border border-stone-100">
+                                            <div className="text-stone-400 text-xs font-semibold mb-1">סה"כ שעות למידה ⏳</div>
+                                            <div className="text-2xl md:text-3xl font-black text-indigo-600">{totalStudyHours > 0 ? `${totalStudyHours} שע'` : '0 שע\''}</div>
+                                            <div className="text-[11px] text-stone-500 font-medium mt-1">
+                                                {tasksWithDuration.length > 0 ? `ממוצע ${avgHoursPerSession} שע' לסשן (${tasksWithDuration.length} מתועדות)` : 'הזיני משך זמן בהגשת משימות'}
+                                            </div>
                                         </div>
                                         <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] border border-stone-100">
                                             <div className="text-stone-400 text-xs font-semibold mb-1">אחוז הגשה בזמן</div>
@@ -5684,7 +6429,12 @@ function App() {
                                                                         {isStrong && <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-bold">חזקה! 💪</span>}
                                                                         {isWeak && <span className="text-[10px] bg-rose-100 text-rose-800 px-2 py-0.5 rounded-full font-bold">חיזוק נדרש 🎯</span>}
                                                                     </div>
-                                                                    <div className="flex items-center gap-1 text-sm font-black text-stone-800">
+                                                                    <div className="flex items-center gap-1.5 text-sm font-black text-stone-800">
+                                                                        {sub.totalStudyHours > 0 && (
+                                                                            <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-lg shadow-2xs">
+                                                                                ⏳ {sub.totalStudyHours} שע'
+                                                                            </span>
+                                                                        )}
                                                                         <span className="text-amber-500">★</span> {rating} <span className="text-xs text-stone-400 font-normal">({sub.completedCount} משימות)</span>
                                                                     </div>
                                                                 </div>
@@ -6392,6 +7142,27 @@ function App() {
                                             <input name="startTime" type="time" defaultValue={editingTask.startTime || ''} className="w-full p-3 bg-white border border-stone-200 rounded-2xl text-sm" />
                                         </div>
                                     )}
+                                    {editingTask.completed && !editingTask.isLessonLog && (
+                                        <div className="bg-indigo-50/50 p-3.5 rounded-2xl border border-indigo-100">
+                                            <label className="text-xs font-bold text-indigo-900 block mb-1 uppercase flex items-center gap-1.5">
+                                                <span>⏳</span> משך למידה בפועל (בשעות - אופציונלי)
+                                            </label>
+                                            <input 
+                                                name="studyDurationHours" 
+                                                type="text" 
+                                                inputMode="decimal" 
+                                                autoComplete="off" 
+                                                defaultValue={editingTask.studyDurationHours || ''} 
+                                                placeholder="למשל: 1.5, 2, 3.5..." 
+                                                className="w-full p-2.5 bg-white border border-indigo-200 rounded-xl text-sm font-bold text-stone-800 outline-none focus:ring-2 focus:ring-indigo-300" 
+                                            />
+                                            {editingTask.studyTimeRange && (
+                                                <div className="text-[11px] text-indigo-700 mt-1 font-semibold">
+                                                    תועד: {editingTask.studyTimeRange}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                     {/* 1. צילומי לוח מהשיעור בעריכה */}
                                     <div className="pt-2 border-t border-stone-100">
                                         <div className="flex items-center justify-between mb-1.5">
@@ -6521,7 +7292,7 @@ function App() {
                         const dueTimeStr = activeTask.dueTime || '23:59:59';
                         const taskDueDateTime = activeTask.dueDate ? new Date(`${activeTask.dueDate}T${dueTimeStr}`) : null;
                         const GRACE_PERIOD_MS = 5 * 60 * 1000;
-                        const activeTaskIsLate = !onTimeSubmitted && taskDueDateTime ? (new Date().getTime() > (taskDueDateTime.getTime() + GRACE_PERIOD_MS)) : false;
+                        const activeTaskIsLate = !activeTask.isFlexibleExamSession && !activeTask.rewardPoints && !onTimeSubmitted && taskDueDateTime ? (new Date().getTime() > (taskDueDateTime.getTime() + GRACE_PERIOD_MS)) : false;
                         
                         return (
                             <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4">
@@ -6532,6 +7303,13 @@ function App() {
                                         <button onClick={()=>{toggleModal('complete',false); setActiveTask(null);}} className="text-stone-400 bg-stone-100 p-2 rounded-full active:scale-95"><IconX className="w-4 h-4"/></button>
                                     </div>
                                     
+                                    {(activeTask.isFlexibleExamSession || activeTask.rewardPoints) && (
+                                        <div className="bg-gradient-to-r from-amber-50 to-orange-50 text-amber-950 p-3 rounded-2xl border border-amber-200 text-xs font-bold mb-4 flex items-center justify-between shadow-2xs">
+                                            <span className="flex items-center gap-1.5"><span>⚡</span> סשן למידה למבחן:</span>
+                                            <span className="bg-amber-200 text-amber-950 px-2.5 py-0.5 rounded-lg font-black">+3 נקודות ישירות למדד! 🏆</span>
+                                        </div>
+                                    )}
+
                                     {activeTaskIsLate && (
                                         <div className="bg-rose-50 text-rose-700 p-3 rounded-xl border border-rose-100 text-xs font-bold mb-4">
                                             {activeTask.autoPenaltyApplied 
@@ -6550,7 +7328,8 @@ function App() {
                                             showToast('אנא בחרי סיבת איחור', 'error');
                                             return;
                                         }
-                                        handleCompleteTask(activeTask, Number(e.target.rating.value), e.target.hard.value, chosenReason);
+                                        const durationInfo = calculateStudyDuration(studyTimeMode, studyDurationHoursInput, studyTimeStart, studyTimeEnd);
+                                        handleCompleteTask(activeTask, Number(e.target.rating.value), e.target.hard.value, chosenReason, durationInfo);
                                     }} className="space-y-6">
                                         
                                         {activeTaskIsLate && (
@@ -6590,6 +7369,162 @@ function App() {
                                                 <span>הכל מובן (5)</span>
                                             </div>
                                         </div>
+
+                                        {/* משך זמן הלמידה (אופציונלי - בחירה) */}
+                                        <div className="bg-indigo-50/60 p-4 md:p-5 rounded-2xl border border-indigo-100 space-y-3">
+                                            <div className="flex justify-between items-center gap-2">
+                                                <label className="text-sm font-bold text-indigo-950 flex items-center gap-1.5">
+                                                    <span>⏳</span> כמה זמן למדת? <span className="text-xs font-normal text-indigo-600">(בחירה - לא חובה)</span>
+                                                </label>
+                                                <div className="flex bg-white p-0.5 rounded-xl border border-indigo-200/80 text-xs font-bold shrink-0">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setStudyTimeMode('direct')}
+                                                        className={`px-2.5 py-1 rounded-lg transition-all ${
+                                                            studyTimeMode === 'direct' 
+                                                                ? 'bg-indigo-600 text-white shadow-xs' 
+                                                                : 'text-indigo-600 hover:text-indigo-800'
+                                                        }`}
+                                                    >
+                                                        לפי שעות
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setStudyTimeMode('range')}
+                                                        className={`px-2.5 py-1 rounded-lg transition-all ${
+                                                            studyTimeMode === 'range' 
+                                                                ? 'bg-indigo-600 text-white shadow-xs' 
+                                                                : 'text-indigo-600 hover:text-indigo-800'
+                                                        }`}
+                                                    >
+                                                        בין שעות
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            {studyTimeMode === 'direct' ? (
+                                                <div className="space-y-2.5">
+                                                    <div className="flex items-center gap-2">
+                                                        <input
+                                                            type="text"
+                                                            inputMode="decimal"
+                                                            autoComplete="off"
+                                                            placeholder="למשל: 1.5, 2, 3.5..."
+                                                            value={studyDurationHoursInput}
+                                                            onChange={(e) => {
+                                                                let val = e.target.value.replace(/[^0-9.,]/g, '').replace(',', '.');
+                                                                const parts = val.split('.');
+                                                                if (parts.length > 2) {
+                                                                    val = parts[0] + '.' + parts.slice(1).join('');
+                                                                }
+                                                                setStudyDurationHoursInput(val);
+                                                            }}
+                                                            className="flex-1 p-3 bg-white border border-indigo-200 rounded-xl text-sm font-bold text-stone-800 outline-none focus:ring-2 focus:ring-indigo-300"
+                                                        />
+                                                        <span className="text-sm font-bold text-indigo-900 whitespace-nowrap">שעות</span>
+                                                        {studyDurationHoursInput && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setStudyDurationHoursInput('')}
+                                                                className="text-stone-400 hover:text-rose-500 text-xs font-bold px-2 py-1"
+                                                                title="איפוס"
+                                                            >
+                                                                ✕
+                                                            </button>
+                                                        )}
+                                                    </div>
+
+                                                    {studyDurationHoursInput && (() => {
+                                                        const dur = calculateStudyDuration('direct', studyDurationHoursInput);
+                                                        if (!dur) return null;
+                                                        return (
+                                                            <div className="bg-white/90 p-2.5 rounded-xl border border-indigo-200 text-xs font-bold text-indigo-900 flex items-center justify-between shadow-2xs">
+                                                                <span>✨ משך למידה שחושב:</span>
+                                                                <span className="text-indigo-700 font-extrabold">{dur.studyTimeRange} ({dur.studyDurationHours} שעות)</span>
+                                                            </div>
+                                                        );
+                                                    })()}
+
+                                                    <div className="flex flex-wrap gap-1.5 pt-1">
+                                                        {[
+                                                            { label: '30 דק\'', val: '0.5' },
+                                                            { label: 'שעה', val: '1' },
+                                                            { label: '1.5 שע\'', val: '1.5' },
+                                                            { label: 'שעתיים', val: '2' },
+                                                            { label: '2.5 שע\'', val: '2.5' },
+                                                            { label: '3 שעות', val: '3' },
+                                                            { label: '3.5 שע\'', val: '3.5' },
+                                                            { label: '4 שעות', val: '4' }
+                                                        ].map(chip => {
+                                                            const numVal = parseFloat(studyDurationHoursInput);
+                                                            const isChipActive = studyDurationHoursInput === chip.val || 
+                                                                (studyDurationHoursInput && !studyDurationHoursInput.endsWith('.') && !isNaN(numVal) && numVal === parseFloat(chip.val));
+                                                            return (
+                                                                <button
+                                                                    key={chip.val}
+                                                                    type="button"
+                                                                    onClick={() => setStudyDurationHoursInput(chip.val)}
+                                                                    className={`text-xs px-2.5 py-1 rounded-lg border transition-all active:scale-95 font-semibold ${
+                                                                        isChipActive
+                                                                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                                                                            : 'bg-white text-indigo-700 border-indigo-200/70 hover:bg-indigo-100/50'
+                                                                    }`}
+                                                                >
+                                                                    {chip.label}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-2.5">
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div>
+                                                            <label className="text-[11px] font-bold text-indigo-900 mb-1 block">משעה:</label>
+                                                            <input
+                                                                type="time"
+                                                                value={studyTimeStart}
+                                                                onChange={(e) => setStudyTimeStart(e.target.value)}
+                                                                className="w-full p-2.5 bg-white border border-indigo-200 rounded-xl text-sm font-bold text-stone-800 outline-none focus:ring-2 focus:ring-indigo-300"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-[11px] font-bold text-indigo-900 mb-1 block">עד שעה:</label>
+                                                            <input
+                                                                type="time"
+                                                                value={studyTimeEnd}
+                                                                onChange={(e) => setStudyTimeEnd(e.target.value)}
+                                                                className="w-full p-2.5 bg-white border border-indigo-200 rounded-xl text-sm font-bold text-stone-800 outline-none focus:ring-2 focus:ring-indigo-300"
+                                                            />
+                                                        </div>
+                                                    </div>
+
+                                                    {studyTimeStart && studyTimeEnd && (() => {
+                                                        const dur = calculateStudyDuration('range', '', studyTimeStart, studyTimeEnd);
+                                                        if (!dur) return null;
+                                                        return (
+                                                            <div className="bg-white/90 p-2.5 rounded-xl border border-indigo-200 text-xs font-bold text-indigo-900 flex items-center justify-between shadow-2xs">
+                                                                <span>✨ חושב אוטומטית:</span>
+                                                                <span className="text-indigo-700">{dur.studyTimeRange}</span>
+                                                            </div>
+                                                        );
+                                                    })()}
+
+                                                    {(studyTimeStart || studyTimeEnd) && (
+                                                        <div className="flex justify-end">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => { setStudyTimeStart(''); setStudyTimeEnd(''); }}
+                                                                className="text-stone-400 hover:text-rose-500 text-xs font-bold"
+                                                            >
+                                                                איפוס שעות ✕
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
                                         <div className="bg-rose-50/50 p-4 rounded-2xl border border-rose-100">
                                             <label className="text-sm font-bold text-rose-700 mb-2 block flex items-center gap-2"><span>📌</span> אילו תרגילים היו קשים? (לא חובה)</label>
                                             <textarea name="hard" rows="2" placeholder="למשל: סעיף ד' בשאלה 5..." className="w-full p-4 border border-rose-200 bg-white rounded-xl text-sm outline-none focus:ring-2 focus:ring-rose-200 resize-none shadow-sm"></textarea>
@@ -6701,11 +7636,189 @@ function App() {
                                         <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase">נושא / שם המבחן</label>
                                         <input type="text" name="examName" required placeholder="למשל: בוחן פתע, מתכונת..." className="w-full p-4 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-indigo-400 font-bold" />
                                     </div>
-                                    <div>
-                                        <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase">תאריך</label>
-                                        <input type="date" name="date" required className="w-full p-4 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-indigo-400 font-bold" />
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase">תאריך</label>
+                                            <input type="date" name="date" required className="w-full p-4 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-indigo-400 font-bold" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase">שעה (אופציונלי)</label>
+                                            <input type="time" name="time" className="w-full p-4 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-indigo-400 font-bold" />
+                                        </div>
                                     </div>
                                     <button type="submit" className="w-full bg-indigo-600 text-white py-4 mt-2 rounded-xl text-sm font-bold shadow-md hover:bg-indigo-700 transition-all active:scale-95">שמירת המבחן</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+
+                    {modals.singleExamSession && (
+                        <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
+                            <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-[slideUp_0.3s_ease-out] pb-safe-bottom md:pb-8 max-h-[90vh] overflow-y-auto custom-scrollbar">
+                                <div className="flex justify-between items-center mb-5">
+                                    <h3 className="font-bold text-xl text-stone-800 flex items-center gap-2">
+                                        <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600 font-black">⚡</div>
+                                        מפגש למידה למבחן
+                                    </h3>
+                                    <button onClick={() => toggleModal('singleExamSession', false)} className="bg-stone-100 p-2 rounded-full text-stone-400 hover:text-stone-600 active:scale-95 transition-colors">
+                                        <IconX className="w-4 h-4"/>
+                                    </button>
+                                </div>
+
+                                <form onSubmit={handleCreateSingleExamSession} className="space-y-4">
+                                    <div className="bg-gradient-to-r from-amber-50 to-orange-50 p-3.5 rounded-2xl border border-amber-200 text-xs text-amber-900 font-medium leading-relaxed">
+                                        <div className="font-bold flex items-center gap-1.5 text-amber-950 mb-1">
+                                            <span>🎯</span> סשן למידה ללא התחייבות:
+                                        </div>
+                                        יוצר מפגש למידה אחד ממוקד למבחן שתבחרי, בלי צורך לחלק שעות או להתחייב למספר מפגשים. <b className="text-amber-800">בסיום המפגש תקבלי 3 נקודות ישירות למדד!</b> 🏆
+                                    </div>
+
+                                    {/* Exam Selection */}
+                                    <div>
+                                        <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase">עבור איזה מבחן?</label>
+                                        {(activeUserData.exams && activeUserData.exams.length > 0) ? (
+                                            <div className="space-y-2">
+                                                <select 
+                                                    value={singleExamSessionData.examId} 
+                                                    onChange={(e) => {
+                                                        const newId = e.target.value;
+                                                        const ex = (activeUserData.exams || []).find(x => x.id === newId);
+                                                        const nextNum = ex ? getNextSessionNumberForExam(ex.id, activeUserData.tasks) : 1;
+                                                        setSingleExamSessionData(prev => ({
+                                                            ...prev,
+                                                            examId: newId,
+                                                            title: ex ? `ללמוד למבחן: ${ex.examName || 'מבחן'} - סשן ${nextNum}` : (prev.title || 'ללמוד למבחן - סשן 1')
+                                                        }));
+                                                    }}
+                                                    className="w-full p-3.5 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-amber-400 font-bold transition-all"
+                                                >
+                                                    <option value="">בחרי מבחן מהרשימה...</option>
+                                                    {activeUserData.exams.map(ex => {
+                                                        const sub = (activeUserData.subjects || []).find(s => s.id === ex.subjectId);
+                                                        return (
+                                                            <option key={ex.id} value={ex.id}>
+                                                                {ex.examName || 'מבחן'} — {sub ? sub.name : 'כללי'} ({ex.date ? new Date(ex.date).toLocaleDateString('he-IL') : ''})
+                                                            </option>
+                                                        );
+                                                    })}
+                                                    <option value="__other__">+ מבחן אחר (הקלדה ידנית)</option>
+                                                </select>
+                                                {singleExamSessionData.examId === '__other__' && (
+                                                    <div className="space-y-2 pt-1 animate-[fadeIn_0.2s_ease-out]">
+                                                        <input 
+                                                            type="text" 
+                                                            placeholder="שם המבחן (למשל: בוחן בפיזיקה)" 
+                                                            value={singleExamSessionData.customExamName || ''} 
+                                                            onChange={(e) => setSingleExamSessionData(prev => ({ ...prev, customExamName: e.target.value }))}
+                                                            required 
+                                                            className="w-full p-3 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-amber-400 font-bold"
+                                                        />
+                                                        <select 
+                                                            value={singleExamSessionData.customSubjectId || ''} 
+                                                            onChange={(e) => setSingleExamSessionData(prev => ({ ...prev, customSubjectId: e.target.value }))}
+                                                            required
+                                                            className="w-full p-3 border border-stone-200 rounded-xl text-xs outline-none bg-stone-50 font-bold"
+                                                        >
+                                                            <option value="">בחרי מקצוע...</option>
+                                                            {(activeUserData.subjects || []).map(s => (
+                                                                <option key={s.id} value={s.id}>{s.emoji} {s.name}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                <input 
+                                                    type="text" 
+                                                    placeholder="שם המבחן (למשל: בגרות באזרחות, מתכונת בפיזיקה)" 
+                                                    value={singleExamSessionData.customExamName || ''} 
+                                                    onChange={(e) => setSingleExamSessionData(prev => ({ ...prev, customExamName: e.target.value }))}
+                                                    required 
+                                                    className="w-full p-3.5 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-amber-400 font-bold"
+                                                />
+                                                <select 
+                                                    value={singleExamSessionData.customSubjectId || ''} 
+                                                    onChange={(e) => setSingleExamSessionData(prev => ({ ...prev, customSubjectId: e.target.value }))}
+                                                    required
+                                                    className="w-full p-3 border border-stone-200 rounded-xl text-xs outline-none bg-stone-50 font-bold"
+                                                >
+                                                    <option value="">בחרי מקצוע...</option>
+                                                    {(activeUserData.subjects || []).map(s => (
+                                                        <option key={s.id} value={s.id}>{s.emoji} {s.name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Session Title */}
+                                    <div>
+                                        <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase">כותרת המפגש / מה ללמוד?</label>
+                                        <input 
+                                            type="text" 
+                                            value={singleExamSessionData.title}
+                                            onChange={(e) => setSingleExamSessionData(prev => ({ ...prev, title: e.target.value }))}
+                                            placeholder="למשל: ללמוד למבחן, חזרה על סיכומים..." 
+                                            required 
+                                            className="w-full p-3.5 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-amber-400 font-bold transition-all"
+                                        />
+                                        <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                                            <span className="text-[11px] font-bold text-stone-400">קיצורים:</span>
+                                            {(() => {
+                                                const selectedEx = (activeUserData.exams || []).find(x => x.id === singleExamSessionData.examId);
+                                                const nextNum = selectedEx ? getNextSessionNumberForExam(selectedEx.id, activeUserData.tasks) : 1;
+                                                const exName = selectedEx ? (selectedEx.examName || 'מבחן') : (singleExamSessionData.customExamName || 'מבחן');
+                                                const presets = [
+                                                    `ללמוד למבחן: ${exName} - סשן ${nextNum}`,
+                                                    `סשן ${nextNum} - חזרה על החומר וסיכומים`,
+                                                    `סשן ${nextNum} - מרתון שאלות ותרגול`,
+                                                    `סשן ${nextNum} - פתרון מבחן לדוגמה`
+                                                ];
+                                                return presets.map(preset => (
+                                                    <button 
+                                                        key={preset} 
+                                                        type="button" 
+                                                        onClick={() => setSingleExamSessionData(prev => ({ ...prev, title: preset }))}
+                                                        className="text-[11px] bg-stone-100 hover:bg-amber-100 text-stone-600 hover:text-amber-800 px-2.5 py-1 rounded-lg transition-colors font-medium active:scale-95 border border-stone-200/60"
+                                                    >
+                                                        {preset}
+                                                    </button>
+                                                ));
+                                            })()}
+                                        </div>
+                                    </div>
+
+                                    {/* Flexible Time Info Notice */}
+                                    <div className="p-3.5 bg-stone-50 rounded-2xl border border-stone-200/80 flex items-center gap-3">
+                                        <div className="w-9 h-9 rounded-xl bg-white border border-stone-200 flex items-center justify-center text-base shrink-0 shadow-2xs">
+                                            🕒
+                                        </div>
+                                        <div className="text-xs text-stone-600">
+                                            <b className="text-stone-800 font-bold block mb-0.5">זמן גמיש לחלוטין</b>
+                                            לומדים מתי שרוצים – הסשן פתוח עד 00:00 בלילה שלפני המבחן.
+                                        </div>
+                                    </div>
+
+                                    {/* 3 Points Highlight Box */}
+                                    <div className="flex items-center justify-between p-3.5 bg-amber-50 rounded-2xl border border-amber-200">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xl">🏆</span>
+                                            <div className="text-xs font-bold text-amber-950">ניקוד מובטח בסיום הסשן:</div>
+                                        </div>
+                                        <div className="text-sm font-black text-amber-800 bg-amber-200/80 px-2.5 py-1 rounded-xl shadow-2xs">
+                                            +3 נקודות
+                                        </div>
+                                    </div>
+
+                                    <button 
+                                        type="submit" 
+                                        className="w-full bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white py-4 mt-2 rounded-2xl text-sm font-bold shadow-md hover:shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+                                    >
+                                        <span>⚡</span>
+                                        <span>יצירת סשן למידה (+3 נקודות)</span>
+                                    </button>
                                 </form>
                             </div>
                         </div>
@@ -6747,7 +7860,8 @@ function App() {
                                                         existingExamId: id,
                                                         subjectId: exam.subjectId,
                                                         examName: exam.examName || '',
-                                                        date: exam.date
+                                                        date: exam.date,
+                                                        time: exam.time || ''
                                                     });
                                                 }}
                                                 className="w-full p-4 bg-white border border-indigo-200 rounded-2xl text-sm outline-none font-bold focus:border-indigo-400 transition-all cursor-pointer"
@@ -6792,16 +7906,27 @@ function App() {
                                         </div>
 
 
-                                        <div>
-                                            <label className="text-xs font-bold text-stone-500 block mb-1.5 uppercase tracking-wide">תאריך המבחן</label>
-                                            <input 
-                                                type="date" 
-                                                value={examPlannerData.date} 
-                                                onChange={e => setExamPlannerData({...examPlannerData, date: e.target.value})} 
-                                                required 
-                                                min={new Date().toISOString().split('T')[0]} 
-                                                className="w-full p-4 bg-white border border-stone-200 rounded-2xl text-sm outline-none font-medium focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all shadow-sm" 
-                                            />
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-500 block mb-1.5 uppercase tracking-wide">תאריך המבחן</label>
+                                                <input 
+                                                    type="date" 
+                                                    value={examPlannerData.date} 
+                                                    onChange={e => setExamPlannerData({...examPlannerData, date: e.target.value})} 
+                                                    required 
+                                                    min={new Date().toISOString().split('T')[0]} 
+                                                    className="w-full p-4 bg-white border border-stone-200 rounded-2xl text-sm outline-none font-medium focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all shadow-sm" 
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-500 block mb-1.5 uppercase tracking-wide">שעת המבחן (אופציונלי)</label>
+                                                <input 
+                                                    type="time" 
+                                                    value={examPlannerData.time || ''} 
+                                                    onChange={e => setExamPlannerData({...examPlannerData, time: e.target.value})} 
+                                                    className="w-full p-4 bg-white border border-stone-200 rounded-2xl text-sm outline-none font-medium focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all shadow-sm" 
+                                                />
+                                            </div>
                                         </div>
 
 
@@ -7004,6 +8129,11 @@ function App() {
                                             </div>
                                             <div className="text-[10px] font-bold text-stone-400 mb-2" dir="ltr">{new Date(log.date).toLocaleString('he-IL')}</div>
                                             <div className={`text-xs font-medium p-2 rounded-lg ${log.points > 0 ? 'bg-emerald-100/30 text-emerald-700' : log.points === 0 ? 'bg-stone-200/50 text-stone-700' : 'bg-rose-100/30 text-rose-700'}`}>{log.details}</div>
+                                            {log.studyTimeRange && (
+                                                <div className="mt-1.5 text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200/70 px-2 py-0.5 rounded-lg inline-flex items-center gap-1">
+                                                    <span>⏳</span> משך למידה: {log.studyTimeRange}
+                                                </div>
+                                            )}
                                         </div>
                                     ))}
                                 </div>
@@ -7422,6 +8552,11 @@ function App() {
                                                         באיחור
                                                     </span>
                                                 )}
+                                                {task.studyTimeRange && (
+                                                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                                        ⏳ {task.studyTimeRange}
+                                                    </span>
+                                                )}
                                             </div>
                                             <h3 className="font-bold text-lg text-stone-800 leading-snug">{task.title}</h3>
                                             {task.lessonTopic && <div className="text-xs text-stone-400 mt-0.5 font-medium">נושא: {task.lessonTopic}</div>}
@@ -7456,11 +8591,9 @@ function App() {
                                                 onChange={async (e) => {
                                                     const files = Array.from(e.target.files || []);
                                                     if (files.length === 0) return;
-                                                    for (const f of files) {
-                                                        await handleQuickAddAttachmentToTask(task, f, 'board');
-                                                    }
-                                                    e.target.value = '';
                                                     setTaskActionsMenu(null);
+                                                    await handleQuickAddAttachmentsToTask(task, files, 'board');
+                                                    e.target.value = '';
                                                 }} 
                                             />
                                             <div className="flex items-center gap-3">
@@ -7480,11 +8613,9 @@ function App() {
                                                     onChange={async (e) => {
                                                         const files = Array.from(e.target.files || []);
                                                         if (files.length === 0) return;
-                                                        for (const f of files) {
-                                                            await handleQuickAddAttachmentToTask(task, f, 'homework');
-                                                        }
-                                                        e.target.value = '';
                                                         setTaskActionsMenu(null);
+                                                        await handleQuickAddAttachmentsToTask(task, files, 'homework');
+                                                        e.target.value = '';
                                                     }} 
                                                 />
                                                 <div className="flex items-center gap-3">
@@ -7556,7 +8687,38 @@ function App() {
                                             <span className="text-stone-400 text-xs">שליחת קישור</span>
                                         </button>
 
-                                        {!task.isExamPrep ? (
+                                        {task.isFlexibleExamSession ? (
+                                            <button 
+                                                onClick={() => {
+                                                    setTaskActionsMenu(null);
+                                                    if (window.confirm('האם את בטוחה שברצונך למחוק את מפגש הלמידה הזה? (הפעולה ללא קנס וללא פגיעה ברצף)')) {
+                                                        updateUserData(prev => {
+                                                            const remainingTasks = (prev.tasks || []).filter(t => t.id !== task.id);
+                                                            const updatedExams = (prev.exams || []).map(ex => {
+                                                                if (task.examId && ex.id === task.examId) {
+                                                                    const remainingForExam = remainingTasks.filter(rt => rt.examId === ex.id);
+                                                                    const completedForExam = remainingTasks.filter(rt => rt.examId === ex.id && (rt.completed || rt.completedAt)).length;
+                                                                    return {
+                                                                        ...ex,
+                                                                        sessionsCount: Math.max(0, remainingForExam.length),
+                                                                        completedSessionsCount: completedForExam
+                                                                    };
+                                                                }
+                                                                return ex;
+                                                            });
+                                                            return { ...prev, tasks: remainingTasks, exams: updatedExams };
+                                                        });
+                                                        showToast('מפגש הלמידה נמחק בהצלחה ✨', 'info');
+                                                    }
+                                                }}
+                                                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-stone-50 hover:bg-rose-50 hover:text-rose-700 text-stone-600 border border-stone-200 hover:border-rose-200 transition-all font-bold text-sm active:scale-98">
+                                                <div className="flex items-center gap-3">
+                                                    <span className="text-xl">🗑️</span>
+                                                    <span>מחיקת מפגש הלמידה</span>
+                                                </div>
+                                                <span className="text-stone-400 text-xs">ללא קנס</span>
+                                            </button>
+                                        ) : !task.isExamPrep ? (
                                             <button 
                                                 onClick={() => {
                                                     setTaskToGiveUp(task);
@@ -7632,9 +8794,27 @@ function App() {
                                             </h3>
                                             <div className="text-xs text-stone-400 mt-0.5 font-medium flex items-center gap-2" dir="ltr">
                                                 <span>📅 {new Date(exam.date).toLocaleDateString('he-IL')}</span>
-                                                {exam.sessionsCount > 0 && (
-                                                    <span dir="rtl">• {exam.sessionsCount} מפגשים ({exam.targetHours} שעות)</span>
-                                                )}
+                                                {exam.time && <span className="text-stone-600 font-bold">• ⏰ {exam.time}</span>}
+                                                {(() => {
+                                                    const examTasks = (activeUserData.tasks || []).filter(t => t.examId === exam.id && !t.givenUp);
+                                                    const completedSessions = examTasks.filter(t => t.completed || t.completedAt).length;
+                                                    const openSessions = examTasks.filter(t => !t.completed && !t.completedAt).length;
+                                                    const totalSessions = Math.max(exam.sessionsCount || 0, completedSessions + openSessions);
+
+                                                    if (completedSessions > 0) {
+                                                        return (
+                                                            <span dir="rtl" className="text-emerald-700 font-bold">
+                                                                • {completedSessions}/{totalSessions} סשנים הושלמו {exam.targetHours ? `(${exam.targetHours} שעות)` : ''}
+                                                            </span>
+                                                        );
+                                                    }
+                                                    if (totalSessions > 0) {
+                                                        return (
+                                                            <span dir="rtl">• {totalSessions} מפגשים {exam.targetHours ? `(${exam.targetHours} שעות)` : 'מתוכננים'}</span>
+                                                        );
+                                                    }
+                                                    return null;
+                                                })()}
                                             </div>
                                         </div>
                                         <button onClick={() => setExamActionsMenu(null)} className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full active:scale-95 transition-colors">
@@ -7656,6 +8836,58 @@ function App() {
                                             </div>
                                             <span className="text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded-md text-[11px] font-bold">
                                                 {exam.grade ? `נוכחי: ${exam.grade}` : 'תיעוד הישג'}
+                                            </span>
+                                        </button>
+
+                                        <button 
+                                            onClick={() => {
+                                                setEditingExam({
+                                                    ...exam,
+                                                    originalExamId: exam.id,
+                                                    originalExamName: exam.examName,
+                                                    originalDate: exam.date,
+                                                    originalTime: exam.time || '',
+                                                    originalSubjectId: exam.subjectId
+                                                });
+                                                setExamActionsMenu(null);
+                                            }}
+                                            className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-amber-50/70 hover:bg-amber-100 text-amber-900 border border-amber-200 transition-all font-bold text-sm active:scale-98">
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xl">✏️</span>
+                                                <span>עריכת פרטי מבחן (כותרת, תאריך ושעה)</span>
+                                            </div>
+                                            <span className="text-amber-700 bg-amber-100/70 px-2 py-0.5 rounded-md text-[11px] font-bold">
+                                                שינוי פרטים
+                                            </span>
+                                        </button>
+
+                                        <button 
+                                            onClick={() => {
+                                                setExamActionsMenu(null);
+                                                handleResyncExamStudySessions(exam);
+                                            }}
+                                            className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-indigo-50/80 hover:bg-indigo-100 text-indigo-950 border border-indigo-200 transition-all font-bold text-sm active:scale-98">
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xl">🔄</span>
+                                                <span>סנכרון מחדש של שעות ותאריכי למידה</span>
+                                            </div>
+                                            <span className="text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded-md text-[11px] font-bold">
+                                                עדכון שעות ולו"ז
+                                            </span>
+                                        </button>
+
+                                        <button 
+                                            onClick={() => {
+                                                setExamActionsMenu(null);
+                                                handleOpenSingleSessionModal(exam);
+                                            }}
+                                            className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-gradient-to-r from-amber-50 to-orange-50 hover:from-amber-100 hover:to-orange-100 text-amber-950 border border-amber-200 transition-all font-bold text-sm active:scale-98">
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xl">⚡</span>
+                                                <span>סשן למידה למבחן (+3 נקודות)</span>
+                                            </div>
+                                            <span className="text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md text-[11px] font-black">
+                                                ללא התחייבות
                                             </span>
                                         </button>
 
@@ -8211,6 +9443,251 @@ function App() {
                                     <button 
                                         onClick={() => setIsMoreMenuOpen(false)}
                                         className="flex-1 py-3 bg-stone-800 hover:bg-stone-900 text-white rounded-2xl font-bold text-xs transition-colors active:scale-95">
+                                        סגירה
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {editingExam && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs animate-[fadeIn_0.15s_ease-out]" dir="rtl">
+                            <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl border border-stone-200 animate-[scaleUp_0.15s_ease-out] relative">
+                                <div className="flex justify-between items-center mb-5 pb-3 border-b border-stone-100">
+                                    <div className="flex items-center gap-2.5">
+                                        <span className="p-2.5 bg-amber-50 text-amber-600 rounded-2xl text-xl">✏️</span>
+                                        <div>
+                                            <h3 className="font-bold text-lg text-stone-800">עריכת פרטי מבחן</h3>
+                                            <p className="text-xs text-stone-500">שינוי שם/כותרת, מקצוע, תאריך ושעה</p>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={() => setEditingExam(null)} 
+                                        className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full transition-colors active:scale-95">
+                                        <IconX className="w-4 h-4"/>
+                                    </button>
+                                </div>
+
+                                <form onSubmit={(e) => {
+                                    e.preventDefault();
+                                    handleSaveEditedExam(editingExam);
+                                }} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-stone-600 mb-1.5">מקצוע</label>
+                                        <select
+                                            value={editingExam.subjectId}
+                                            onChange={(e) => setEditingExam({ ...editingExam, subjectId: e.target.value })}
+                                            className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all">
+                                            {(activeUserData.subjects || []).map(sub => (
+                                                <option key={sub.id} value={sub.id}>{sub.emoji} {sub.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-stone-600 mb-1.5">שם / כותרת המבחן</label>
+                                        <input
+                                            type="text"
+                                            required
+                                            value={editingExam.examName || ''}
+                                            onChange={(e) => setEditingExam({ ...editingExam, examName: e.target.value })}
+                                            placeholder="לדוגמה: מבחן אמצע, בגרות מועד א'..."
+                                            className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all"
+                                        />
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="block text-xs font-bold text-stone-600 mb-1.5">תאריך המבחן</label>
+                                            <input
+                                                type="date"
+                                                required
+                                                value={editingExam.date || ''}
+                                                onChange={(e) => setEditingExam({ ...editingExam, date: e.target.value })}
+                                                className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-stone-600 mb-1.5">שעת המבחן (אופציונלי)</label>
+                                            <input
+                                                type="time"
+                                                value={editingExam.time || ''}
+                                                onChange={(e) => setEditingExam({ ...editingExam, time: e.target.value })}
+                                                className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {(() => {
+                                        const targetExamName = (editingExam.originalExamName || editingExam.examName || '').trim();
+                                        const targetSubjId = editingExam.originalSubjectId || editingExam.subjectId;
+                                        const openTasksCount = (activeUserData.tasks || []).filter(t => {
+                                            if (t.completed || t.completedAt) return false;
+                                            if (t.examId) {
+                                                return String(t.examId) === String(editingExam.id);
+                                            }
+                                            if (!t.isExamPrep) return false;
+                                            if (targetSubjId && t.subjectId && String(t.subjectId) !== String(targetSubjId)) return false;
+                                            if (!targetExamName) return false;
+                                            const topic = (t.lessonTopic || '').trim();
+                                            const title = (t.title || '').trim();
+                                            return topic === `הכנה למבחן: ${targetExamName}` || 
+                                                   topic === targetExamName || 
+                                                   title === `ללמוד למבחן: ${targetExamName}` || 
+                                                   title.startsWith(`למידה ל${targetExamName} ב`) ||
+                                                   title.startsWith(`ללמוד ל${targetExamName}`);
+                                        }).length;
+
+                                        if (openTasksCount === 0) return null;
+                                        return (
+                                            <div className="bg-indigo-50/80 border border-indigo-100 rounded-2xl p-3 text-xs text-indigo-900 leading-relaxed flex items-start gap-2.5">
+                                                <span className="text-base shrink-0">⚡</span>
+                                                <div>
+                                                    <span className="font-bold block text-indigo-950">סנכרון שעות ותאריכים אוטומטי ({openTasksCount} מפגשים פתוחים)</span>
+                                                    <span>שינוי התאריך יעדכן ויפזר מחדש את תאריכי ושעות הלמידה בחלונות הזמן הפנויים בלו"ז שלך עד המבחן.</span>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+
+                                    <div className="flex gap-2.5 pt-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setEditingExam(null)}
+                                            className="flex-1 py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl font-bold text-sm transition-colors active:scale-95">
+                                            ביטול
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm shadow-md hover:shadow-lg transition-all active:scale-95">
+                                            שמירת שינויים 💾
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {isSyncDiagnosticsOpen && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs animate-[fadeIn_0.15s_ease-out]" dir="rtl">
+                            <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl border border-stone-200 animate-[scaleUp_0.15s_ease-out] relative max-h-[90vh] overflow-y-auto custom-scrollbar">
+                                <div className="flex justify-between items-center mb-4 pb-3 border-b border-stone-100">
+                                    <div className="flex items-center gap-2.5">
+                                        <div className={`w-9 h-9 rounded-2xl flex items-center justify-center text-lg ${
+                                            syncState === 'synced' ? 'bg-emerald-100 text-emerald-700' :
+                                            syncState === 'syncing' ? 'bg-amber-100 text-amber-700' :
+                                            syncState === 'offline' ? 'bg-stone-100 text-stone-600' : 'bg-rose-100 text-rose-700'
+                                        }`}>
+                                            {syncState === 'synced' ? '🟢' :
+                                             syncState === 'syncing' ? '🟡' :
+                                             syncState === 'offline' ? '⚪' : '🔴'}
+                                        </div>
+                                        <div>
+                                            <h3 className="font-bold text-lg text-stone-800">בדיקת סנכרון ענן וחיבור</h3>
+                                            <p className="text-xs text-stone-500">סטטוס חיבור בזמן אמת בין הטלפון למחשב</p>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={() => setIsSyncDiagnosticsOpen(false)} 
+                                        className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full transition-colors active:scale-95">
+                                        <IconX className="w-4 h-4"/>
+                                    </button>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <div className={`p-4 rounded-2xl border ${
+                                        syncState === 'synced' ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950' :
+                                        syncState === 'syncing' ? 'bg-amber-50/70 border-amber-200 text-amber-950' :
+                                        syncState === 'offline' ? 'bg-stone-50 border-stone-200 text-stone-800' :
+                                        'bg-rose-50/70 border-rose-200 text-rose-950'
+                                    }`}>
+                                        <div className="flex items-center justify-between mb-2">
+                                            <span className="font-black text-sm">
+                                                {syncState === 'synced' ? '✅ הסנכרון פועל בצורה מושלמת' :
+                                                 syncState === 'syncing' ? '⏳ סנכרון מתבצע כעת מול הענן...' :
+                                                 syncState === 'offline' ? '📴 עבודה במצב מקומי (Offline)' :
+                                                 '⚠️ שגיאת הרשאות ענן (Firebase Permission Denied)'}
+                                            </span>
+                                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-white/80 border">
+                                                {syncState.toUpperCase()}
+                                            </span>
+                                        </div>
+                                        <p className="text-xs leading-relaxed opacity-90">
+                                            {syncState === 'synced' ? 'כל השינויים, המשימות והנקודות שמורים ומסונכרנים אוטומטית לענן וזמינים גם בטלפון וגם במחשב.' :
+                                             syncState === 'syncing' ? 'מעביר נתונים עדכניים לענן ומושך שינויים ממכשירים אחרים...' :
+                                             syncState === 'offline' ? 'הדפדפן אינו מחובר כרגע לאינטרנט. כל המידע והשינויים שלך נשמרים בזיכרון המקומי ויסונכרנו אוטומטית ברגע שהחיבור יחזור!' :
+                                             'כל המידע שלך שמור ומאובטח במכשיר! השגיאה נובעת מסיום 30 ימי הטסט ב-Firebase. כדי לאפשר סנכרון דו-כיווני בין הטלפון למחשב, יש לעדכן את החוקים ב-Firebase Console.'}
+                                        </p>
+                                        {syncErrorDetails && (
+                                            <div className="mt-2.5 p-2 bg-white/90 rounded-xl text-[11px] font-mono text-stone-600 border border-stone-200 overflow-x-auto text-left" dir="ltr">
+                                                {syncErrorDetails}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <button
+                                        onClick={async () => {
+                                            showToast('בודק חיבור ומסנכרן מול הענן... 🔄', 'info');
+                                            await pushPendingSyncToCloud();
+                                        }}
+                                        disabled={syncState === 'syncing'}
+                                        className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-2xl font-bold text-sm shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 active:scale-95">
+                                        <span>🔄</span> סנכרן עכשיו ובדוק חיבור
+                                    </button>
+
+                                    <div className="bg-stone-50 rounded-2xl p-4 border border-stone-200 space-y-2.5 text-xs text-stone-700">
+                                        <div className="font-bold text-stone-900 flex items-center justify-between">
+                                            <span>🛠️ הגדרת חוקי גישה קבועים (Firebase Rules)</span>
+                                            <a 
+                                                href="https://console.firebase.google.com/project/loos-77484/firestore/rules" 
+                                                target="_blank" 
+                                                rel="noopener noreferrer"
+                                                className="text-indigo-600 hover:underline font-bold flex items-center gap-1">
+                                                פתיחת הקונסול ↗️
+                                            </a>
+                                        </div>
+                                        <p className="text-[11px] text-stone-500 leading-normal">
+                                            ב-Firebase נפתח את לשונית <b>Firestore Database</b> &gt; <b>Rules</b>, נדביק את החוקים הבאים ונלחץ <b>Publish</b>:
+                                        </p>
+                                        <div className="relative">
+                                            <pre className="p-2.5 bg-stone-900 text-stone-100 rounded-xl text-[10px] font-mono overflow-x-auto text-left leading-relaxed" dir="ltr">
+{`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+    match /task_attachments/{attachmentId} {
+      allow read, write: if true;
+    }
+  }
+}`}
+                                            </pre>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    navigator.clipboard?.writeText(`rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /users/{userId} {\n      allow read, write: if true;\n    }\n    match /task_attachments/{attachmentId} {\n      allow read, write: if true;\n    }\n  }\n}`);
+                                                    showToast('חוקי הגישה הועתקו ללוח! 📋', 'success');
+                                                }}
+                                                className="absolute top-2 left-2 px-2 py-1 bg-stone-700 hover:bg-stone-600 text-white rounded text-[10px] font-bold active:scale-95">
+                                                העתקה 📋
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="p-3 bg-purple-50/60 border border-purple-100 rounded-2xl flex items-start gap-2.5 text-xs text-purple-900">
+                                        <span className="text-base shrink-0">🛡️</span>
+                                        <div>
+                                            <span className="font-bold">הגנת מידע כפולה: </span>
+                                            <span>ההתקדמות, הסטריק, הנקודות והקבצים שלך מגובים באופן רציף גם בזיכרון המקומי של המכשיר וגם בגיבוי חירום מבודד, כך ששום נתון לא הולך לאיבוד.</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="mt-5 pt-3 border-t border-stone-100">
+                                    <button 
+                                        onClick={() => setIsSyncDiagnosticsOpen(false)}
+                                        className="w-full py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-2xl font-bold text-sm transition-colors active:scale-95">
                                         סגירה
                                     </button>
                                 </div>
