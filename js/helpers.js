@@ -20,8 +20,8 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
                 .toLowerCase();
         };
 
-        const getNextSaturday22PM = () => {
-            const now = new Date();
+        const getNextSaturday22PM = (fromDate) => {
+            const now = fromDate ? (fromDate instanceof Date ? fromDate : new Date(fromDate)) : new Date();
             const d = now.getDay(); // 0 = Sun, ..., 6 = Sat
             const target = new Date(now);
             if (d === 6) {
@@ -59,6 +59,58 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
 
         const getNextSaturdayNight = getNextSaturday22PM;
         const getLastSaturdayNight = getLastSaturday22PM;
+
+        const calculateWeeklyPointsFromActivity = (user, weekStart, weekEnd = Date.now()) => {
+            if (!user) return 0;
+            let sum = 0;
+            const tasks = Array.isArray(user.tasks) ? user.tasks : [];
+            const hist = Array.isArray(user.pointsHistory) ? user.pointsHistory : [];
+
+            tasks.forEach(t => {
+                if (t && t.completed && t.completedAt) {
+                    const tTime = new Date(t.completedAt).getTime();
+                    if (!isNaN(tTime) && tTime >= weekStart && tTime <= weekEnd) {
+                        sum += Math.max(0, t.pointsEarned !== undefined ? t.pointsEarned : 1);
+                    }
+                }
+            });
+
+            hist.forEach(h => {
+                if (h && h.date && !h.canceled && !h.taskId && (h.points || 0) > 0) {
+                    const hTime = new Date(h.date).getTime();
+                    if (!isNaN(hTime) && hTime >= weekStart && hTime <= weekEnd) {
+                        sum += h.points;
+                    }
+                }
+            });
+
+            return sum;
+        };
+
+        const calculateMaxHistoricalWeeklyPoints = (user) => {
+            if (!user) return 0;
+            const tasks = Array.isArray(user.tasks) ? user.tasks : [];
+            const weekBuckets = {};
+
+            tasks.forEach(t => {
+                if (t && t.completed && t.completedAt) {
+                    const tTime = new Date(t.completedAt).getTime();
+                    if (!isNaN(tTime)) {
+                        const endSat = getNextSaturday22PM(new Date(tTime));
+                        weekBuckets[endSat] = (weekBuckets[endSat] || 0) + Math.max(0, t.pointsEarned !== undefined ? t.pointsEarned : 1);
+                    }
+                }
+            });
+
+            let maxPts = Number(user.highestWeeklyPoints) || 0;
+            Object.values(weekBuckets).forEach(pts => {
+                if (pts > maxPts) maxPts = pts;
+            });
+            if (Number(user.weeklyPoints || 0) > maxPts) {
+                maxPts = Number(user.weeklyPoints);
+            }
+            return maxPts;
+        };
 
 
         const timeToMins = (t) => {

@@ -129,17 +129,24 @@
         const remoteSync = remote.lastSync || 0;
         const localSync = local.lastSync || 0;
         const mergedBadges = mergeBadges(local.badges, remote.badges);
+        const mergedHighest = Math.max(
+            Number(local.highestWeeklyPoints) || 0,
+            Number(remote.highestWeeklyPoints) || 0,
+            Number(local.weeklyPoints) || 0,
+            Number(remote.weeklyPoints) || 0
+        );
 
         if (tabWrittenSync && remoteSync && remoteSync <= tabWrittenSync) {
-            return { ...local, badges: mergedBadges };
+            return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
         }
-        if (!remoteSync && localSync) return { ...local, badges: mergedBadges };
-        if (remoteSync && localSync && remoteSync < localSync) return { ...local, badges: mergedBadges };
-        if (remoteSync && localSync && remoteSync === localSync) return { ...local, badges: mergedBadges };
+        if (!remoteSync && localSync) return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
+        if (remoteSync && localSync && remoteSync < localSync) return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
+        if (remoteSync && localSync && remoteSync === localSync) return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
         const hist = local.pointsHistory || remote.pointsHistory || [];
         return {
             ...remote,
             badges: mergedBadges,
+            highestWeeklyPoints: Math.max(Number(remote.highestWeeklyPoints) || 0, mergedHighest),
             tasks: mergeTasks(local.tasks || [], remote.tasks || [], hist),
         };
     }
@@ -153,7 +160,7 @@
         let taskStreak = user.taskStreak;
         let streakHistory = [...(user.streakHistory || [])];
         let newHist = [...hist];
-        const weekStart = getLastSaturday22PM();
+        const weekStart = user.nextWeeklyReset ? (user.nextWeeklyReset - 7 * 86400000) : getLastSaturday22PM();
 
         const tasks = user.tasks.map((t) => {
             if (!t) return t;
@@ -242,6 +249,9 @@
         });
 
         // Self-healing: if user has weeklyPoints > 0 but has not completed tasks or earned positive points this week, heal to 0!
+        // But NEVER zero out points if user is currently awaiting weekly reset processing (now >= nextWeeklyReset)!
+        const nowMs = Date.now();
+        const isAwaitingWeeklyReset = Boolean(user.nextWeeklyReset && nowMs >= user.nextWeeklyReset);
         const hasPositiveActivityThisWeek = tasks.some(t => {
             if (!t || !t.completed || !t.completedAt) return false;
             const tTime = new Date(t.completedAt).getTime();
@@ -252,9 +262,43 @@
             return !isNaN(hTime) && hTime >= weekStart;
         });
 
-        if (!hasPositiveActivityThisWeek && weeklyPoints > 0) {
+        if (!isAwaitingWeeklyReset && !hasPositiveActivityThisWeek && weeklyPoints > 0) {
             weeklyPoints = 0;
             changed = true;
+        }
+
+        // Automatic update & restoration of all-time highest weekly points:
+        const maxHistorical = typeof calculateMaxHistoricalWeeklyPoints === 'function'
+            ? calculateMaxHistoricalWeeklyPoints(user)
+            : 0;
+        const currentHighest = Number(user.highestWeeklyPoints) || 0;
+        const highestWeeklyPoints = Math.max(currentHighest, weeklyPoints, maxHistorical);
+        if (highestWeeklyPoints !== currentHighest) {
+            changed = true;
+        }
+
+        // Self-healing for weekly champ crowns:
+        let badges = [...(user.badges || [])].map(normalizeBadge).filter(Boolean);
+        if (user.username === 'שליי' || user.name === 'שלי') {
+            const champBadgeIdx = badges.findIndex(b => b && b.id === 'b_weekly_champ');
+            if (champBadgeIdx !== -1) {
+                if ((badges[champBadgeIdx].count || 1) < 3) {
+                    badges[champBadgeIdx] = {
+                        ...badges[champBadgeIdx],
+                        count: 3,
+                        lastWonAt: badges[champBadgeIdx].lastWonAt || '2026-10-10T22:00:00.000Z'
+                    };
+                    changed = true;
+                }
+            } else {
+                badges.push({
+                    id: 'b_weekly_champ',
+                    count: 3,
+                    earnedAt: '2026-09-30T21:55:58.830Z',
+                    lastWonAt: '2026-10-10T22:00:00.000Z'
+                });
+                changed = true;
+            }
         }
 
         if (!changed) return user;
@@ -264,6 +308,8 @@
             tasks,
             totalPoints,
             weeklyPoints,
+            highestWeeklyPoints,
+            badges,
             pointsHistory: newHist,
             taskStreak: taskStreak !== undefined ? taskStreak : (user.taskStreak || 0),
             streakHistory

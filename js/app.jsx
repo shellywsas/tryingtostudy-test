@@ -232,6 +232,15 @@ function App() {
                     const updatedUser = typeof updater === 'function' ? updater(user) : { ...user, ...updater };
                     if (updatedUser === user) return prev;
                     
+                    // סנכרון ושמירה אוטומטית ומיידית של שיא הנקודות בכל פעם שנקודות השבוע גדלות
+                    if (typeof updatedUser.weeklyPoints === 'number') {
+                        updatedUser.highestWeeklyPoints = Math.max(
+                            Number(updatedUser.highestWeeklyPoints) || 0,
+                            Number(user?.highestWeeklyPoints) || 0,
+                            Number(updatedUser.weeklyPoints) || 0
+                        );
+                    }
+
                     updatedUser.lastSync = Date.now();
                     pendingWriteSync.current = updatedUser.lastSync;
                     
@@ -281,6 +290,10 @@ function App() {
 
             const checkAndAwardBadges = (userData) => {
                 if(!userData) return userData;
+                userData.highestWeeklyPoints = Math.max(
+                    Number(userData.highestWeeklyPoints) || 0,
+                    Number(userData.weeklyPoints) || 0
+                );
                 let newBadges = [...(userData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : b));
                 let earnedNew = false;
                 
@@ -422,85 +435,102 @@ function App() {
 
             useEffect(() => {
                 if (!activeUserData || !globalState.activeUser) return;
-                const now = new Date().getTime();
-                const weekStart = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
-                
-                // 1. Regular weekly reset on Saturday 22:00
-                if (now > (activeUserData.nextWeeklyReset || 0)) {
-                    const userWeeklyPts = activeUserData.weeklyPoints || 0;
-                    const friendsArr = Object.values(liveFriends || {});
-                    let isTop = true;
-                    let topFriendName = '';
-                    let topFriendPts = 0;
 
-                    friendsArr.forEach(f => {
-                        const fPts = f.weeklyPoints || 0;
-                        if (fPts > userWeeklyPts) {
-                            isTop = false;
-                            if (fPts > topFriendPts) {
-                                topFriendPts = fPts;
-                                topFriendName = f.name || f.username;
-                            }
-                        }
-                    });
+                const checkWeeklyReset = () => {
+                    const currentUser = activeUserDataRef.current || activeUserData;
+                    if (!currentUser || !globalState.activeUser) return;
 
-                    let updatedBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : b));
-                    let wonCrown = false;
+                    const now = Date.now();
+                    const resetTime = currentUser.nextWeeklyReset || getNextSaturday22PM();
 
-                    if (isTop && userWeeklyPts > 0) {
-                        wonCrown = true;
-                        const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
-                        if (champBadgeIdx !== -1) {
-                            updatedBadges[champBadgeIdx] = {
-                                ...updatedBadges[champBadgeIdx],
-                                count: (updatedBadges[champBadgeIdx].count || 1) + 1,
-                                lastWonAt: new Date().toISOString()
-                            };
-                        } else {
-                            updatedBadges.push({
-                                id: 'b_weekly_champ',
-                                count: 1,
-                                earnedAt: new Date().toISOString()
-                            });
-                        }
-                        showToast(`👑 מזל טוב! הוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! זכית בתג אלופת השבוע! 👑`, 'success');
-                    } else if (topFriendName && topFriendPts > 0) {
-                        showToast(`סיום שבוע! אלופת השבוע החולף היא ${topFriendName} עם ${topFriendPts} נק' 👑`, 'info');
+                    // If nextWeeklyReset was never set, initialize it
+                    if (!currentUser.nextWeeklyReset) {
+                        updateUserData({ nextWeeklyReset: getNextSaturday22PM() });
+                        return;
                     }
 
-                    updateUserData(prev => ({
-                        ...prev,
-                        highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, prev.weeklyPoints || 0),
-                        lastWeekPoints: prev.weeklyPoints || 0,
-                        weeklyPoints: 0,
-                        nextWeeklyReset: getNextSaturday22PM(),
-                        badges: wonCrown ? updatedBadges : (prev.badges || [])
-                    }));
-                    return;
-                }
+                    // נעילה ובדיקה שבועית במוצאי שבת ב-22:00
+                    if (now >= resetTime) {
+                        const weekWindowEnd = resetTime;
+                        const weekWindowStart = weekWindowEnd - (7 * 86400000);
 
-                // 2. Self-healing check: if weeklyPoints > 0 but user has not done any tasks or earned points since the start of this week, heal to 0
-                if ((activeUserData.weeklyPoints || 0) > 0) {
-                    const tasks = activeUserData.tasks || [];
-                    const hist = activeUserData.pointsHistory || [];
-                    const hasPositiveActivityThisWeek = tasks.some(t => {
-                        if (!t || !t.completed || !t.completedAt) return false;
-                        const tTime = new Date(t.completedAt).getTime();
-                        return !isNaN(tTime) && tTime >= weekStart;
-                    }) || hist.some(h => {
-                        if (!h || !h.date || h.canceled || (h.points || 0) <= 0) return false;
-                        const hTime = new Date(h.date).getTime();
-                        return !isNaN(hTime) && hTime >= weekStart;
-                    });
+                        // חישוב מדויק של נקודות המשתמשת מהשבוע שהסתיים:
+                        // לוקחים את המקסימום בין הערך הקיים לבין חישוב מדויק מהמשימות וההיסטוריה
+                        const ptsFromActivity = typeof calculateWeeklyPointsFromActivity === 'function'
+                            ? calculateWeeklyPointsFromActivity(currentUser, weekWindowStart, weekWindowEnd)
+                            : 0;
+                        const userWeeklyPts = Math.max(currentUser.weeklyPoints || 0, ptsFromActivity);
 
-                    if (!hasPositiveActivityThisWeek) {
+                        // איסוף כל החברות והשוואת הנקודות בצורה מלאה ומדויקת
+                        const friendsMap = new Map();
+                        (currentUser.friends || []).forEach(f => {
+                            if (f && f.username && f.username !== globalState.activeUser) {
+                                friendsMap.set(f.username, f);
+                            }
+                        });
+                        Object.values(liveFriends || {}).forEach(f => {
+                            if (f && f.username && f.username !== globalState.activeUser) {
+                                friendsMap.set(f.username, { ...(friendsMap.get(f.username) || {}), ...f });
+                            }
+                        });
+
+                        let isTop = true;
+                        let topFriendName = '';
+                        let topFriendPts = 0;
+
+                        friendsMap.forEach(f => {
+                            // משווים מול הניקוד של השבוע שהסתיים (אם החברה כבר התאפסה - מול lastWeekPoints, אחרת מול weeklyPoints)
+                            const fPts = Math.max(f.weeklyPoints || 0, f.lastWeekPoints || 0);
+                            if (fPts > userWeeklyPts) {
+                                isTop = false;
+                                if (fPts > topFriendPts) {
+                                    topFriendPts = fPts;
+                                    topFriendName = f.name || f.username;
+                                }
+                            }
+                        });
+
+                        let updatedBadges = [...(currentUser.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : b));
+                        let wonCrown = false;
+
+                        if (isTop && userWeeklyPts > 0) {
+                            wonCrown = true;
+                            const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
+                            if (champBadgeIdx !== -1) {
+                                updatedBadges[champBadgeIdx] = {
+                                    ...updatedBadges[champBadgeIdx],
+                                    count: (updatedBadges[champBadgeIdx].count || 1) + 1,
+                                    lastWonAt: new Date().toISOString()
+                                };
+                            } else {
+                                updatedBadges.push({
+                                    id: 'b_weekly_champ',
+                                    count: 1,
+                                    earnedAt: new Date().toISOString(),
+                                    lastWonAt: new Date().toISOString()
+                                });
+                            }
+                            showToast(`👑 מזל טוב! הוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! זכית בתג אלופת השבוע! 👑`, 'success');
+                        } else if (topFriendName && topFriendPts > 0) {
+                            showToast(`סיום שבוע! אלופת השבוע החולף היא ${topFriendName} עם ${topFriendPts} נק' 👑`, 'info');
+                        }
+
+                        const nextSaturday = getNextSaturday22PM();
                         updateUserData(prev => ({
                             ...prev,
-                            weeklyPoints: 0
+                            highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, userWeeklyPts),
+                            lastWeekPoints: userWeeklyPts,
+                            weeklyPoints: 0,
+                            nextWeeklyReset: nextSaturday,
+                            badges: wonCrown ? updatedBadges : (prev.badges || [])
                         }));
                     }
-                }
-            }, [globalState.activeUser, activeUserData?.nextWeeklyReset, activeUserData?.weeklyPoints]);
+                };
+
+                checkWeeklyReset();
+                const intervalId = setInterval(checkWeeklyReset, 30 * 1000);
+                return () => clearInterval(intervalId);
+            }, [globalState.activeUser, activeUserData?.nextWeeklyReset]);
 
 
             useEffect(() => {
@@ -2083,6 +2113,7 @@ function App() {
                         tasks: updatedTasks,
                         totalPoints: prev.totalPoints + pointsDelta,
                         weeklyPoints: prev.weeklyPoints + pointsDelta,
+                        highestWeeklyPoints: Math.max(Number(prev.highestWeeklyPoints) || 0, (Number(prev.weeklyPoints) || 0) + pointsDelta),
                         taskStreak: newStreak,
                         longestStreak: newLongest,
                         currentStreakStart: newStreakStart,
@@ -2372,6 +2403,7 @@ function App() {
                         exams: updatedExams,
                         totalPoints: prev.totalPoints + pointsDelta,
                         weeklyPoints: prev.weeklyPoints + pointsDelta,
+                        highestWeeklyPoints: Math.max(Number(prev.highestWeeklyPoints) || 0, (Number(prev.weeklyPoints) || 0) + pointsDelta),
                         pointsHistory: newHistory
                     });
                 });
