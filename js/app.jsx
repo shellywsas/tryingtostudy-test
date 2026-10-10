@@ -202,6 +202,9 @@ function App() {
             }, [globalState.activeUser]);
 
             const activeUserData = globalState.activeUser ? globalState.users[globalState.activeUser] : null;
+            const activeUserDataRef = useRef(activeUserData);
+            activeUserDataRef.current = activeUserData;
+            const weeklyReportSentRef = useRef('');
 
             useEffect(() => {
                 if (!activeUserData) return;
@@ -935,11 +938,6 @@ function App() {
                     }));
                 }
 
-                updateUserData(prev => ({
-                    ...prev,
-                    tasks: (prev.tasks || []).map(t => t.id === task.id ? { ...t, whatsappRemindersEnabled: true } : t)
-                }));
-
                 // בדיקת שעות בית ספר: אם התלמידה בבית ספר כרגע, לא שולחים הודעה שתפריע בשיעור!
                 const now = new Date();
                 const todayDay = now.getDay();
@@ -961,6 +959,17 @@ function App() {
                         schoolNoticeTime = `${String(startH).padStart(2, '0')}:${String(startM).padStart(2, '0')}`;
                     }
                 }
+
+                const nowTs = Date.now();
+                if (!isInSchoolNow && activeUserDataRef.current) {
+                    activeUserDataRef.current.lastGlobalWhatsAppReminderSent = nowTs;
+                }
+
+                updateUserData(prev => ({
+                    ...prev,
+                    lastGlobalWhatsAppReminderSent: isInSchoolNow ? (prev.lastGlobalWhatsAppReminderSent || 0) : nowTs,
+                    tasks: (prev.tasks || []).map(t => t.id === task.id ? { ...t, whatsappRemindersEnabled: true } : t)
+                }));
 
                 if (isInSchoolNow) {
                     showToast(`תזכורות וואטסאפ הופעלו! 📚 כי את בבית ספר כעת, התזכורת הראשונה תישלח לקראת סיום הלימודים (ב-${schoolNoticeTime}).`, 'success');
@@ -1041,12 +1050,28 @@ function App() {
             };
 
             const handleSendParentWeeklyReportWhatsApp = (silent = false) => {
-                const p1 = activeUserData?.parentPhoneNumber?.trim();
-                const p2 = activeUserData?.parentPhoneNumber2?.trim();
+                const currentUser = activeUserDataRef.current || activeUserData;
+                const currentWeek = getWeekIdentifier();
 
-                if (!p1 && !p2) {
+                // מניעת שליחה כפולה אם הדוח כבר נשלח השבוע
+                if (silent && (currentUser?.lastWeeklyReportSentWeek === currentWeek || weeklyReportSentRef.current === currentWeek)) {
+                    console.log('Weekly parent report already sent for week:', currentWeek);
+                    return;
+                }
+
+                // נעילה מיידית של שבוע השליחה למניעת כל הרצה כפולה
+                weeklyReportSentRef.current = currentWeek;
+                if (currentUser) currentUser.lastWeeklyReportSentWeek = currentWeek;
+
+                const p1 = currentUser?.parentPhoneNumber?.trim();
+                const p2 = currentUser?.parentPhoneNumber2?.trim();
+
+                // שליחת הודעה אחת בלבד להורה (עדיפות למספר הראשי, או למספר השני אם הראשי ריק)
+                const targetPhone = p1 || p2;
+
+                if (!targetPhone) {
                     if (!silent) {
-                        showToast('נא להזין תחילה לפחות מספר הורה אחד בהגדרות ⚙️', 'warning');
+                        showToast('נא להזין תחילה מספר הורה בהגדרות ⚙️', 'warning');
                         setActiveTab('settings');
                     }
                     return;
@@ -1058,26 +1083,23 @@ function App() {
                     return;
                 }
 
-                const messageText = WhatsAppService.generateParentReportText(activeUserData.name || 'שלי', reportData);
-                const recipients = [p1, p2].filter(Boolean);
+                const messageText = WhatsAppService.generateParentReportText(currentUser.name || 'שלי', reportData);
 
-                recipients.forEach(phone => {
-                    WhatsAppService.sendMessage({
-                        to: phone,
-                        message: messageText,
-                        gatewayConfig: activeUserData.whatsappGateway
-                    }).catch(err => console.error('Error sending parent report to:', phone, err));
-                });
+                // שליחת הודעה אחת בלבד
+                WhatsAppService.sendMessage({
+                    to: targetPhone,
+                    message: messageText,
+                    gatewayConfig: currentUser.whatsappGateway
+                }).catch(err => console.error('Error sending parent report to:', targetPhone, err));
 
-                const currentWeek = getWeekIdentifier();
                 updateUserData(prev => ({
                     ...prev,
                     lastWeeklyReportSentWeek: currentWeek
                 }));
 
                 if (!silent) {
-                    if (activeUserData?.whatsappGateway?.instanceId) {
-                        showToast(`דוח שבועי נשלח אוטומטית לוואטסאפ של ${recipients.length > 1 ? 'שני ההורים' : 'ההורים'}! 📨🚀`, 'success');
+                    if (currentUser?.whatsappGateway?.instanceId) {
+                        showToast(`דוח שבועי נשלח אוטומטית לוואטסאפ של ההורים! 📨🚀`, 'success');
                     } else {
                         showToast(`נפתח וואטסאפ לשליחת הדוח השבועי להורים 📲`, 'info');
                     }
@@ -1086,31 +1108,34 @@ function App() {
 
             // אוטומציה של וואטסאפ: שליחת דוח שבועי במוצאי שבת ותזכורות משימות מתוזמנות
             useEffect(() => {
-                if (!activeUserData || !activeUserData.whatsappGateway?.instanceId) return;
-
                 const runWhatsAppAutomationCheck = () => {
+                    const currentData = activeUserDataRef.current;
+                    if (!currentData || !currentData.whatsappGateway?.instanceId) return;
+
                     const now = new Date();
                     const day = now.getDay(); // 6 = Saturday, 0 = Sunday
                     const hour = now.getHours();
                     const currentWeek = getWeekIdentifier(now);
 
-                    // 1. שליחת דוח הורים במוצאי שבת (החל מ-19:00) או בראשון בבוקר
+                    // 1. שליחת דוח הורים במוצאי שבת (החל מ-19:00) או בראשון בבוקר - הודעה אחת בלבד
                     const isSaturdayEveningOrSunday = (day === 6 && hour >= 19) || (day === 0 && hour < 14);
-                    const alreadySentThisWeek = activeUserData.lastWeeklyReportSentWeek === currentWeek;
-                    const autoSendEnabled = activeUserData.autoSendParentReport !== false;
+                    const alreadySentThisWeek = currentData.lastWeeklyReportSentWeek === currentWeek || weeklyReportSentRef.current === currentWeek;
+                    const autoSendEnabled = currentData.autoSendParentReport !== false;
 
                     if (isSaturdayEveningOrSunday && !alreadySentThisWeek && autoSendEnabled) {
-                        const hasParent = activeUserData.parentPhoneNumber || activeUserData.parentPhoneNumber2;
+                        const hasParent = currentData.parentPhoneNumber || currentData.parentPhoneNumber2;
                         if (hasParent) {
                             console.log('Sending automatic Saturday evening parent report via WhatsApp...');
+                            weeklyReportSentRef.current = currentWeek;
+                            currentData.lastWeeklyReportSentWeek = currentWeek;
                             handleSendParentWeeklyReportWhatsApp(true);
                         }
                     }
 
                     // 2. תזכורות משימות חכמות (רק עבור משימות שהופעלו עליהן תזכורות וואטסאפ)
-                    if (activeUserData.phoneNumber) {
+                    if (currentData.phoneNumber) {
                         // חישוב חלון זמנים מותר: אם יש בית ספר היום - רק מחצי שעה לפני סיום הלימודים ועד 22:00
-                        const todayPlan = (activeUserData.scheduleSettings || []).find(s => s.day === day);
+                        const todayPlan = (currentData.scheduleSettings || []).find(s => s.day === day);
                         const schoolEndTime = todayPlan?.schoolEndTime;
                         const currentMinutes = hour * 60 + now.getMinutes();
 
@@ -1126,29 +1151,32 @@ function App() {
                         }
 
                         if (canSendRemindersNow) {
-                            const lastGlobalSent = activeUserData.lastGlobalWhatsAppReminderSent || 0;
+                            const lastGlobalSent = currentData.lastGlobalWhatsAppReminderSent || 0;
                             const hoursSinceGlobal = (Date.now() - lastGlobalSent) / (1000 * 60 * 60);
 
                             // מרווח גלובלי של 3.5 שעות לפחות בין תזכורות כדי למנוע ספאם!
                             if (hoursSinceGlobal >= 3.5) {
-                                const activeTasks = (activeUserData.tasks || []).filter(t => !t.completed && t.whatsappRemindersEnabled && t.dueDate);
+                                const activeTasks = (currentData.tasks || []).filter(t => !t.completed && t.whatsappRemindersEnabled && t.dueDate);
                                 if (activeTasks.length > 0) {
+                                    const nowTs = Date.now();
+                                    currentData.lastGlobalWhatsAppReminderSent = nowTs;
+
                                     // מייצרים הודעה אחת מרוכזת ומעודנת במקום להציף בהודעות נפרדות
                                     const reminderMsg = WhatsAppService.generateCombinedStudentReminderText(
-                                        activeUserData.name || 'שלי',
+                                        currentData.name || 'שלי',
                                         activeTasks,
-                                        activeUserData.subjects || []
+                                        currentData.subjects || []
                                     );
 
                                     WhatsAppService.sendMessage({
-                                        to: activeUserData.phoneNumber,
+                                        to: currentData.phoneNumber,
                                         message: reminderMsg,
-                                        gatewayConfig: activeUserData.whatsappGateway
+                                        gatewayConfig: currentData.whatsappGateway
                                     }).then(res => {
                                         if (res && res.status === 'sent_gateway') {
                                             updateUserData(prev => ({
                                                 ...prev,
-                                                lastGlobalWhatsAppReminderSent: Date.now()
+                                                lastGlobalWhatsAppReminderSent: nowTs
                                             }));
                                         }
                                     }).catch(e => console.error('Automated WhatsApp reminder error:', e));
@@ -1161,7 +1189,7 @@ function App() {
                 runWhatsAppAutomationCheck();
                 const intervalId = setInterval(runWhatsAppAutomationCheck, 10 * 60 * 1000);
                 return () => clearInterval(intervalId);
-            }, [activeUserData?.whatsappGateway?.instanceId, activeUserData?.lastWeeklyReportSentWeek, activeUserData?.tasks, activeUserData?.scheduleSettings]);
+            }, []);
 
             const [liveFriends, setLiveFriends] = useState({});
             
@@ -5331,7 +5359,7 @@ function App() {
                                                 />
                                                 <div className="text-xs text-stone-700">
                                                     <span className="font-bold block">שליחה אוטומטית של דוח שבועי בכל מוצאי שבת 🗓️</span>
-                                                    <span className="text-stone-500">המערכת תסכם אוטומטית את כל המשימות, שעות הלמידה וההתמדה ותשלח לשני ההורים בימי שבת בערב.</span>
+                                                    <span className="text-stone-500">המערכת תסכם אוטומטית את כל המשימות, שעות הלמידה וההתמדה ותשלח הודעה אחת מרוכזת להורים בימי שבת בערב.</span>
                                                 </div>
                                             </label>
                                         </div>
