@@ -1,114 +1,15 @@
-/**
- * StudyStreak Pro - Service Worker for Background Notifications & PWA
- */
-const CACHE_NAME = 'studystreak-v20261024_psycho4';
- 
-self.addEventListener('install', (event) => {
+self.addEventListener('install', (e) => {
     self.skipWaiting();
 });
 
-self.addEventListener('activate', (event) => {
-    event.waitUntil(
-        caches.keys().then(keys => Promise.all(
-            keys.map(key => caches.delete(key))
-        )).then(() => self.clients.claim())
+self.addEventListener('activate', (e) => {
+    e.waitUntil(
+        caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))))
+            .then(() => self.clients.claim())
     );
 });
 
-// Listen for push notifications from server/Firebase
-self.addEventListener('push', (event) => {
-    let payload = {
-        title: 'StudyStreak Pro ✨',
-        body: 'תזכורת חכמה לשיעורי בית!',
-        icon: './icons/icon-192.png',
-        tag: 'study-reminder-' + Date.now(),
-        data: { url: '/' }
-    };
-
-    if (event.data) {
-        try {
-            const json = event.data.json();
-            payload = { ...payload, ...json };
-        } catch (e) {
-            payload.body = event.data.text();
-        }
-    }
-
-    const options = {
-        body: payload.body,
-        icon: payload.icon,
-        badge: payload.icon,
-        vibrate: [250, 100, 250, 100, 250],
-        tag: payload.tag,
-        renotify: true,
-        requireInteraction: true,
-        data: payload.data,
-        actions: [
-            { action: 'open', title: 'פתיחת המשימה 🚀' },
-            { action: 'dismiss', title: 'אחר כך' }
-        ]
-    };
-
-    event.waitUntil(
-        self.registration.showNotification(payload.title, options)
-    );
-});
-
-// Handle notification clicks
-self.addEventListener('notificationclick', (event) => {
-    event.notification.close();
-
-    if (event.action === 'dismiss') return;
-
-    const targetUrl = (event.notification.data && event.notification.data.url) || '/';
-
-    event.waitUntil(
-        clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
-            for (let client of windowClients) {
-                if ('focus' in client) {
-                    return client.focus();
-                }
-            }
-            if (clients.openWindow) {
-                return clients.openWindow(targetUrl);
-            }
-        })
-    );
-});
-
-// Message from app client to trigger/schedule local notifications and cancellations
-const activeTimeoutsByTask = new Map();
-
-self.addEventListener('message', (event) => {
-    if (!event.data) return;
-
-    if (event.data.type === 'SCHEDULE_NOTIFICATION') {
-        const { title, body, delayMs, tag, taskId } = event.data;
-        const timeoutId = setTimeout(() => {
-            self.registration.showNotification(title, {
-                body: body,
-                icon: './icons/icon-192.png',
-                vibrate: [250, 100, 250],
-                tag: tag || 'reminder-' + Date.now(),
-                requireInteraction: true
-            });
-        }, Math.max(0, delayMs || 0));
-
-        if (taskId) {
-            if (!activeTimeoutsByTask.has(taskId)) {
-                activeTimeoutsByTask.set(taskId, []);
-            }
-            activeTimeoutsByTask.get(taskId).push(timeoutId);
-        }
-    }
-
-    if (event.data.type === 'CANCEL_TASK_REMINDERS') {
-        const { taskId } = event.data;
-        if (taskId && activeTimeoutsByTask.has(taskId)) {
-            const timeouts = activeTimeoutsByTask.get(taskId);
-            timeouts.forEach(t => clearTimeout(t));
-            activeTimeoutsByTask.delete(taskId);
-            console.log('Cancelled scheduled reminders for task:', taskId);
-        }
-    }
+self.addEventListener('fetch', (e) => {
+    // Pass through to network
+    e.respondWith(fetch(e.request));
 });
