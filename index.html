@@ -3,44 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <meta name="theme-color" content="#fdf2f8">
+    <meta name="theme-color" content="#fafaf9">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <title>PsychoStreak - ניהול למידה חכם לפסיכומטרי 🎯</title>
-
-    <!-- Favicon & Touch Icon -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>StudyStreak Pro - ניהול למידה חכם לבגרויות</title>
+    
+    <!-- Favicon & Manifest -->
+    <link rel="icon" type="image/png" sizes="64x64" href="./favicon.png">
     <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png">
     <link rel="apple-touch-icon" href="./icons/icon-192.png">
+    <link id="manifest-link" rel="manifest" href="manifest.json">
+    <script src="js/pwa.js?v=20261024_2"></script>
 
-    <!-- Fonts: Rubik for clean Hebrew StudyStreak typography -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <!-- Firebase Compat SDKs (CDN) -->
+    <script src="https://www.gstatic.com/firebasejs/10.4.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.4.0/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.4.0/firebase-auth-compat.js"></script>
 
-    <!-- Tailwind CSS CDN -->
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
             theme: {
                 extend: {
-                    fontFamily: {
-                        sans: ['Rubik', 'system-ui', '-apple-system', 'sans-serif'],
-                    },
-                    colors: {
-                        // StudyStreak Pink Accent Palette
-                        pink: {
-                            50: '#fdf2f8',
-                            100: '#fce7f3',
-                            200: '#fbcfe8',
-                            300: '#f9a8d4',
-                            400: '#f472b6',
-                            500: '#ec4899',
-                            600: '#db2777',
-                            700: '#be185d',
-                            800: '#9d174d',
-                            900: '#831843',
-                        }
-                    },
                     spacing: {
                         'safe-bottom': 'env(safe-area-inset-bottom)',
                         'safe-top': 'env(safe-area-inset-top)',
@@ -49,1653 +38,151 @@
             }
         };
     </script>
-
-    <style>
-        body {
-            font-family: 'Rubik', sans-serif;
-            -webkit-tap-highlight-color: transparent;
-        }
-        .hide-scrollbar::-webkit-scrollbar { display: none; }
-        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #fbcfe8; border-radius: 999px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #f472b6; }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(6px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes popIn {
-            0% { transform: scale(0.92); opacity: 0; }
-            100% { transform: scale(1); opacity: 1; }
-        }
-        .animate-fadeIn { animation: fadeIn 0.22s ease-out forwards; }
-        .animate-popIn { animation: popIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-    </style>
-</head>
-<body class="bg-[#FAFAFA] text-stone-800 min-h-screen selection:bg-pink-100 selection:text-pink-900 pb-20 md:pb-0">
-
-    <!-- Toast Notifications -->
-    <div id="toast-container" class="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-11/12 max-w-sm pointer-events-none space-y-2"></div>
-
-    <!-- 5-Minute Warning Banner (Idea 1) -->
-    <div id="warning-banner" class="hidden fixed top-16 left-1/2 -translate-x-1/2 z-[90] w-11/12 max-w-md bg-gradient-to-r from-pink-500 to-rose-500 text-white p-4 rounded-3xl shadow-2xl flex items-center gap-3 animate-popIn border-2 border-pink-300">
-        <span class="text-3xl">⚠️</span>
-        <div class="flex-1 text-xs sm:text-sm font-black">
-            נותרו 5 דקות לסיום הפרק! להתחיל לסמן שאלות שלא הספקת!
-        </div>
-        <button onclick="dismissWarning()" class="bg-black/20 hover:bg-black/30 px-3 py-1.5 rounded-xl text-xs font-bold transition-all">הבנתי</button>
-    </div>
-
-    <!-- Outer Wrapper (Identical to StudyStreak Structure) -->
-    <div class="min-h-screen flex flex-col md:flex-row" dir="rtl">
-
-        <!-- ============================================================= -->
-        <!-- DESKTOP SIDEBAR (Identical to StudyStreak <aside>) -->
-        <!-- ============================================================= -->
-        <aside class="hidden md:flex flex-col w-72 bg-white/80 backdrop-blur-xl border-l border-stone-200 p-6 sticky top-0 h-screen overflow-y-auto custom-scrollbar">
-            
-            <!-- Logo & Brand Header -->
-            <div class="flex items-center justify-between mb-8">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 bg-gradient-to-br from-pink-100 to-rose-100 rounded-2xl flex items-center justify-center text-xl shadow-xs">
-                        🎯
-                    </div>
-                    <div>
-                        <h1 class="text-lg font-bold text-stone-900 leading-tight tracking-tight flex items-center gap-1">
-                            <span>PsychoStreak</span>
-                        </h1>
-                        <div class="text-[11px] text-pink-600 font-bold mt-0.5">פסיכומטרי דו-תחומי</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Flame Streak Card (Dark stone with pink flame accent) -->
-            <div class="bg-gradient-to-br from-stone-800 to-stone-900 text-white p-5 rounded-3xl mb-6 shadow-md group relative cursor-pointer transition-all hover:shadow-lg active:scale-95" onclick="switchTab('analytics')">
-                <div class="absolute top-0 right-0 w-24 h-24 bg-pink-500/10 rounded-full blur-2xl -mr-10 -mt-10 pointer-events-none"></div>
-                <div class="relative z-10 flex justify-between items-center mb-1">
-                    <span class="text-xs text-stone-400 font-medium">רצף למידה יומי</span>
-                    <span class="text-xs text-pink-300 font-bold bg-white/10 px-2 py-0.5 rounded-lg">פסיכומטרי</span>
-                </div>
-                <div class="text-4xl font-black text-pink-300 relative z-10 group-hover:scale-105 transition-transform origin-right flex items-center gap-2 drop-shadow-md pb-1">
-                    <span id="sidebar-streak-num">0</span>
-                    <span class="text-3xl drop-shadow-md">🔥</span>
-                </div>
-            </div>
-
-            <!-- Navigation Links -->
-            <nav class="flex flex-col gap-2 flex-1 w-full">
-                <button onclick="switchTab('dashboard')" id="nav-btn-dashboard" class="nav-btn flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 bg-pink-50 text-pink-700 font-bold shadow-xs">
-                    <span class="text-lg">🎯</span>
-                    <span>דשבורד ראשי</span>
-                </button>
-                <button onclick="switchTab('essays')" id="nav-btn-essays" class="nav-btn flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 text-stone-600 hover:bg-stone-50 hover:text-stone-900">
-                    <span class="text-lg">✍️</span>
-                    <span>חיבורים (2 בשבוע)</span>
-                </button>
-                <button onclick="switchTab('sections')" id="nav-btn-sections" class="nav-btn flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 text-stone-600 hover:bg-stone-50 hover:text-stone-900">
-                    <span class="text-lg">⏱️</span>
-                    <span>פתירת פרקים (4 בשבוע)</span>
-                </button>
-                <button onclick="switchTab('math')" id="nav-btn-math" class="nav-btn flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 text-stone-600 hover:bg-stone-50 hover:text-stone-900">
-                    <span class="text-lg">🧮</span>
-                    <span>חישוב מהיר (15 דק')</span>
-                </button>
-                <button onclick="switchTab('analytics')" id="nav-btn-analytics" class="nav-btn flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 text-stone-600 hover:bg-stone-50 hover:text-stone-900">
-                    <span class="text-lg">📊</span>
-                    <span>דיוק וסטטיסטיקה</span>
-                </button>
-            </nav>
-
-            <!-- Bottom Action Button -->
-            <div class="mt-auto pt-6 space-y-3">
-                <button onclick="openQuickActionModal()" class="w-full py-4 bg-gradient-to-r from-pink-400 to-rose-400 hover:from-pink-500 hover:to-rose-500 text-white rounded-2xl font-bold shadow-md shadow-pink-500/20 flex items-center justify-center gap-2 text-sm transition-all active:scale-95">
-                    <span>+</span> תיעוד תרגול / פרק
-                </button>
-                <button onclick="openExamDateModal()" class="w-full py-2.5 text-xs text-stone-500 hover:text-pink-600 font-semibold bg-stone-50 hover:bg-pink-50 rounded-2xl transition-colors flex items-center justify-center gap-1.5 active:scale-95">
-                    <span>⏳</span> הגדרת מועד בחינה
-                </button>
-            </div>
-        </aside>
-
-        <!-- ============================================================= -->
-        <!-- MOBILE HEADER (<header>) -->
-        <!-- ============================================================= -->
-        <header class="md:hidden flex justify-between items-center bg-white/90 backdrop-blur-md p-4 sticky top-0 z-40 border-b border-stone-100 pt-safe-top">
-            <div class="flex items-center gap-2.5">
-                <div class="w-8 h-8 bg-gradient-to-br from-pink-100 to-rose-100 rounded-xl flex items-center justify-center text-base shadow-xs">🎯</div>
-                <div>
-                    <div class="font-bold text-base text-stone-900 tracking-tight">PsychoStreak</div>
-                    <div class="text-[10px] text-pink-600 font-bold">פסיכומטרי</div>
-                </div>
-            </div>
-            <div class="flex gap-2 items-center">
-                <button onclick="openExamDateModal()" class="bg-pink-50 text-pink-700 border border-pink-200/70 px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95">
-                    <span>⏳</span> <span id="mobile-countdown-text">מועד</span>
-                </button>
-                <button onclick="switchTab('analytics')" class="bg-gradient-to-r from-pink-50 to-rose-50 text-pink-700 border border-pink-200/70 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95 shadow-2xs">
-                    <span>🔥</span> <span id="mobile-streak-num">0</span>
-                </button>
-            </div>
-        </header>
-
-        <!-- ============================================================= -->
-        <!-- MOBILE BOTTOM NAVIGATION (<nav>) -->
-        <!-- ============================================================= -->
-        <nav class="md:hidden fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-xl border-t border-stone-200 z-40 pb-safe-bottom overflow-x-auto hide-scrollbar flex justify-around px-2 pt-2 shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
-            <button onclick="switchTab('dashboard')" id="mob-nav-dashboard" class="mob-nav-btn flex flex-col items-center gap-1 py-1.5 px-3 rounded-2xl text-[11px] font-bold text-pink-700 bg-pink-50 flex-1">
-                <span class="text-lg">🎯</span>
-                <span>ראשי</span>
-            </button>
-            <button onclick="switchTab('essays')" id="mob-nav-essays" class="mob-nav-btn flex flex-col items-center gap-1 py-1.5 px-3 rounded-2xl text-[11px] font-medium text-stone-500 hover:text-stone-800 flex-1">
-                <span class="text-lg">✍️</span>
-                <span>חיבורים</span>
-            </button>
-            <button onclick="switchTab('sections')" id="mob-nav-sections" class="mob-nav-btn flex flex-col items-center gap-1 py-1.5 px-3 rounded-2xl text-[11px] font-medium text-stone-500 hover:text-stone-800 flex-1">
-                <span class="text-lg">⏱️</span>
-                <span>פרקים</span>
-            </button>
-            <button onclick="switchTab('math')" id="mob-nav-math" class="mob-nav-btn flex flex-col items-center gap-1 py-1.5 px-3 rounded-2xl text-[11px] font-medium text-stone-500 hover:text-stone-800 flex-1">
-                <span class="text-lg">🧮</span>
-                <span>חישוב</span>
-            </button>
-            <button onclick="switchTab('analytics')" id="mob-nav-analytics" class="mob-nav-btn flex flex-col items-center gap-1 py-1.5 px-3 rounded-2xl text-[11px] font-medium text-stone-500 hover:text-stone-800 flex-1">
-                <span class="text-lg">📊</span>
-                <span>דיוק</span>
-            </button>
-        </nav>
-
-        <!-- ============================================================= -->
-        <!-- MAIN CONTENT AREA (<main>) -->
-        <!-- ============================================================= -->
-        <main class="flex-1 w-full max-w-5xl mx-auto p-4 md:p-6 lg:p-8 relative z-10 space-y-6">
-
-            <!-- Hero Countdown Banner (Light Pink Pastel Style) -->
-            <div class="bg-gradient-to-br from-pink-500 via-rose-500 to-pink-600 text-white rounded-3xl p-6 md:p-7 shadow-xl shadow-pink-500/15 relative overflow-hidden">
-                <div class="absolute -right-10 -bottom-10 w-44 h-44 bg-white/10 rounded-full blur-2xl pointer-events-none"></div>
-                <div class="absolute -left-10 -top-10 w-44 h-44 bg-rose-400/30 rounded-full blur-2xl pointer-events-none"></div>
-
-                <div class="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
-                        <div class="flex items-center gap-2 mb-2 flex-wrap">
-                            <span class="bg-white/20 border border-white/30 text-white text-xs font-black px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1.5">
-                                <span>🎯</span> פסיכומטרי דו-תחומי
-                            </span>
-                            <span id="week-date-badge" class="text-xs text-pink-100 font-medium bg-black/10 px-3 py-1 rounded-full border border-white/10">
-                                שבוע: א'-ש'
-                            </span>
-                        </div>
-                        <h2 class="text-2xl md:text-3xl font-black text-white tracking-tight">
-                            הסטריקים של הפסיכומטרי 🎯
-                        </h2>
-                        <p class="text-xs md:text-sm text-pink-100 mt-1 max-w-lg">
-                            משמעת זמנים, חישוב מהיר ללא מחשבון ו-2 חיבורים בשבוע. כל יום קובע!
-                        </p>
-                    </div>
-
-                    <!-- Exam Countdown Pill in Hero -->
-                    <div onclick="openExamDateModal()" class="bg-white/15 hover:bg-white/20 backdrop-blur-md border border-white/25 p-4 rounded-2xl flex items-center gap-3.5 cursor-pointer transition-all active:scale-95 shadow-sm">
-                        <span class="text-3xl">⏳</span>
-                        <div>
-                            <div class="text-[10px] text-pink-100 font-bold uppercase">ספירה לאחור למועד</div>
-                            <div id="hero-countdown-text" class="text-lg md:text-xl font-black text-white">טוען...</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ========================================================= -->
-            <!-- 4 METRIC CARDS (Identical to StudyStreak Dashboard Grid) -->
-            <!-- ========================================================= -->
-            <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                
-                <!-- Card 1: Master Days Streak -->
-                <div class="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-pink-200 transition-colors group flex flex-col justify-between active:scale-95" onclick="switchTab('analytics')">
-                    <div class="text-stone-400 text-xs font-semibold mb-2 flex items-center justify-between">
-                        <span>רצף ימים</span>
-                        <span class="text-rose-400 group-hover:scale-110 transition-transform">🔥</span>
-                    </div>
-                    <div>
-                        <div id="metric-streak" class="text-3xl font-black text-stone-800">0</div>
-                        <div class="text-[11px] font-bold text-pink-600 mt-1">ימים ברצף</div>
-                    </div>
-                </div>
-
-                <!-- Card 2: Essays Weekly Target (0/2) -->
-                <div class="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-pink-200 transition-colors group flex flex-col justify-between active:scale-95" onclick="switchTab('essays')">
-                    <div class="text-stone-400 text-xs font-semibold mb-2 flex items-center justify-between">
-                        <span>חיבורים השבוע</span>
-                        <span class="text-amber-500">✍️</span>
-                    </div>
-                    <div>
-                        <div id="metric-essays" class="text-3xl font-black text-pink-600 text-right" dir="ltr">0 / 2</div>
-                        <div id="metric-essays-sub" class="text-[11px] font-bold text-stone-500 mt-1">יעד: 2 בשבוע (א'-ש')</div>
-                    </div>
-                </div>
-
-                <!-- Card 3: Mental Math Today -->
-                <div class="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-pink-200 transition-colors group flex flex-col justify-between active:scale-95" onclick="switchTab('math')">
-                    <div class="text-stone-400 text-xs font-semibold mb-2 flex items-center justify-between">
-                        <span>חישוב כמותי היום</span>
-                        <span class="text-rose-500">🧮</span>
-                    </div>
-                    <div>
-                        <div id="metric-math" class="text-3xl font-black text-stone-800">15 דק'</div>
-                        <div id="metric-math-status" class="text-[11px] font-bold text-amber-600 mt-1">⏳ טרם בוצע</div>
-                    </div>
-                </div>
-
-                <!-- Card 4: Sections Weekly Target (0/4) -->
-                <div class="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-pink-200 transition-colors group flex flex-col justify-between active:scale-95" onclick="switchTab('sections')">
-                    <div class="text-stone-400 text-xs font-semibold mb-2 flex items-center justify-between">
-                        <span>פרקים השבוע</span>
-                        <span class="text-pink-600">⏱️</span>
-                    </div>
-                    <div>
-                        <div id="metric-sections" class="text-3xl font-black text-rose-600 text-right" dir="ltr">0 / 4</div>
-                        <div id="metric-sections-sub" class="text-[11px] font-bold text-stone-500 mt-1">יעד: 4 פרקים (א'-ש')</div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- ========================================================= -->
-            <!-- TAB 1: DASHBOARD (ראשי) -->
-            <!-- ========================================================= -->
-            <div id="tab-dashboard" class="tab-content space-y-6 animate-fadeIn">
-                
-                <!-- Quick Timers & Action Row -->
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <!-- Quick Essay Timer Box -->
-                    <div class="bg-white p-5 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] hover:border-pink-200 transition-all flex flex-col justify-between">
-                        <div>
-                            <div class="flex items-center justify-between mb-2">
-                                <span class="text-xs font-bold text-stone-400 uppercase">מטלת כתיבה (30 דק')</span>
-                                <span class="text-amber-500 text-sm">✍️</span>
-                            </div>
-                            <div class="font-bold text-stone-900 text-base">טיימר חיבור מונחה</div>
-                            <p class="text-xs text-stone-500 mt-1">3 שלבים: תכנון (5'), כתיבה (20') והגהה (5')</p>
-                        </div>
-                        <button onclick="switchTab('essays')" class="mt-4 w-full py-2.5 bg-pink-50 hover:bg-pink-100 text-pink-700 font-bold rounded-2xl text-xs transition-all active:scale-95">
-                            כניסה למטלת כתיבה ✍️
-                        </button>
-                    </div>
-
-                    <!-- Quick Section Timer Box -->
-                    <div class="bg-white p-5 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] hover:border-pink-200 transition-all flex flex-col justify-between">
-                        <div>
-                            <div class="flex items-center justify-between mb-2">
-                                <span class="text-xs font-bold text-stone-400 uppercase">פתירת פרק בזמן</span>
-                                <span class="text-pink-600 text-sm">⏱️</span>
-                            </div>
-                            <div class="font-bold text-stone-900 text-base">טיימר 20 דק' + התראה</div>
-                            <p class="text-xs text-stone-500 mt-1">התראת צפצוף ב-5 דקות לסיום + תחקור טעויות</p>
-                        </div>
-                        <button onclick="switchTab('sections')" class="mt-4 w-full py-2.5 bg-pink-50 hover:bg-pink-100 text-pink-700 font-bold rounded-2xl text-xs transition-all active:scale-95">
-                            כניסה לפרקים בזמן ⏱️
-                        </button>
-                    </div>
-
-                    <!-- Quick Mental Math Box -->
-                    <div class="bg-white p-5 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] hover:border-pink-200 transition-all flex flex-col justify-between">
-                        <div>
-                            <div class="flex items-center justify-between mb-2">
-                                <span class="text-xs font-bold text-stone-400 uppercase">חישוב כמותי מהיר</span>
-                                <span class="text-rose-500 text-sm">🧮</span>
-                            </div>
-                            <div class="font-bold text-stone-900 text-base">15 דקות ללא מחשבון</div>
-                            <p class="text-xs text-stone-500 mt-1">תרגול כפל, חזקות, שורשים ואחוזים יומי</p>
-                        </div>
-                        <button onclick="switchTab('math')" class="mt-4 w-full py-2.5 bg-pink-50 hover:bg-pink-100 text-pink-700 font-bold rounded-2xl text-xs transition-all active:scale-95">
-                            כניסה לחישוב מהיר 🧮
-                        </button>
-                    </div>
-                </div>
-
-                <!-- This Week Activity Stream -->
-                <div class="bg-white p-6 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)]">
-                    <div class="flex items-center justify-between mb-4">
-                        <div class="flex items-center gap-2">
-                            <span class="text-lg">📋</span>
-                            <h3 class="font-bold text-stone-900 text-base">פעילות השבוע הנוכחי (א'-ש')</h3>
-                        </div>
-                        <span id="dashboard-total-acts" class="text-xs text-pink-600 font-bold bg-pink-50 px-2.5 py-1 rounded-xl">0 פעילויות</span>
-                    </div>
-
-                    <div id="dashboard-recent-list" class="space-y-2">
-                        <!-- Populated by JS -->
-                    </div>
-                </div>
-            </div>
-
-            <!-- ========================================================= -->
-            <!-- TAB 2: ESSAYS (חיבורים - 2 בשבוע) -->
-            <!-- ========================================================= -->
-            <div id="tab-essays" class="tab-content hidden space-y-6 animate-fadeIn">
-                <div class="bg-white p-6 md:p-8 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] space-y-6">
-                    
-                    <div class="flex items-center justify-between flex-wrap gap-3">
-                        <div class="flex items-center gap-3">
-                            <div class="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center text-2xl shadow-2xs">
-                                ✍️
-                            </div>
-                            <div>
-                                <h3 class="text-xl font-bold text-stone-900">סטריק מטלת כתיבה</h3>
-                                <p class="text-xs text-stone-500">חובה 2 חיבורים מלאים בשבוע (מיום ראשון עד מוצ"ש)</p>
-                            </div>
-                        </div>
-                        <span id="essay-streak-chip" class="text-xs font-bold text-amber-700 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200 flex items-center gap-1.5 shadow-2xs">
-                            <span>🏆</span> 0 שבועות רצופים
-                        </span>
-                    </div>
-
-                    <!-- Weekly Progress Bar -->
-                    <div class="p-4 bg-stone-50 rounded-2xl border border-stone-200/80">
-                        <div class="flex justify-between items-center text-xs font-bold mb-2">
-                            <span class="text-stone-700">התקדמות השבוע</span>
-                            <span id="tab-essay-progress-num" class="text-stone-900 font-black">0 / 2 חיבורים</span>
-                        </div>
-                        <div class="w-full h-3.5 bg-stone-200/70 rounded-full overflow-hidden p-0.5">
-                            <div id="tab-essay-progress-bar" class="h-full rounded-full transition-all duration-500 bg-gradient-to-r from-pink-400 to-rose-400 w-0"></div>
-                        </div>
-                    </div>
-
-                    <!-- 30-min Guided Essay Timer -->
-                    <div class="p-6 bg-gradient-to-br from-amber-50/70 to-orange-50/40 rounded-3xl border border-amber-200/80 text-center space-y-3">
-                        <div class="text-xs font-bold text-amber-900 uppercase tracking-wider flex items-center justify-center gap-1.5">
-                            <span>⏱️</span> טיימר כתיבה מונחה (30 דקות בדיוק)
-                        </div>
-                        <div id="tab-essay-timer-num" class="text-4xl md:text-5xl font-black text-amber-950 font-mono tracking-wider">
-                            30:00
-                        </div>
-                        <div>
-                            <span id="tab-essay-phase-badge" class="text-xs font-bold px-3 py-1 rounded-full text-amber-800 bg-amber-100 border border-amber-200 inline-block">
-                                שלב 1: תכנון, עמדה וסיעור מוחות (5 דק')
-                            </span>
-                        </div>
-                        <div class="flex items-center justify-center gap-2 pt-1">
-                            <button id="tab-essay-timer-btn" onclick="toggleEssayTimer()" class="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-2xl font-bold text-xs md:text-sm shadow-md shadow-amber-500/20 active:scale-95 transition-all">
-                                ▶️ התחל כתיבה
-                            </button>
-                            <button onclick="resetEssayTimer()" class="px-4 py-2.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-2xl font-bold text-xs md:text-sm transition-all">
-                                איפוס
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Action Button & List -->
-                    <div class="space-y-4 pt-2">
-                        <div class="flex items-center justify-between">
-                            <h4 class="font-bold text-stone-900 text-sm">חיבורים שנכתבו השבוע:</h4>
-                            <button onclick="openAddEssayModal()" class="px-4 py-2 bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-bold rounded-2xl text-xs flex items-center gap-1.5 shadow-sm active:scale-95 transition-all">
-                                <span>+</span> תיעוד חיבור שבוצע
-                            </button>
-                        </div>
-                        <div id="tab-essays-list" class="space-y-2">
-                            <!-- Injected by JS -->
-                        </div>
-                    </div>
-
-                </div>
-            </div>
-
-            <!-- ========================================================= -->
-            <!-- TAB 3: SECTIONS (פרקים בזמן - 4 בשבוע) -->
-            <!-- ========================================================= -->
-            <div id="tab-sections" class="tab-content hidden space-y-6 animate-fadeIn">
-                <div class="bg-white p-6 md:p-8 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] space-y-6">
-                    
-                    <div class="flex items-center justify-between flex-wrap gap-3">
-                        <div class="flex items-center gap-3">
-                            <div class="w-12 h-12 rounded-2xl bg-pink-50 border border-pink-100 flex items-center justify-center text-2xl shadow-2xs text-pink-600">
-                                ⏱️
-                            </div>
-                            <div>
-                                <h3 class="text-xl font-bold text-stone-900">סטריק פתירת פרקים בזמן</h3>
-                                <p class="text-xs text-stone-500">חובה 4 פרקים בשבוע (כמותי מתוך 20 / מילולי מתוך 23)</p>
-                            </div>
-                        </div>
-                        <span id="tab-section-streak-chip" class="text-xs font-bold text-pink-700 bg-pink-50 px-3 py-1.5 rounded-xl border border-pink-200 flex items-center gap-1.5 shadow-2xs">
-                            <span>⚡</span> 0 שבועות רצופים
-                        </span>
-                    </div>
-
-                    <!-- Weekly Progress Bar -->
-                    <div class="p-4 bg-stone-50 rounded-2xl border border-stone-200/80">
-                        <div class="flex justify-between items-center text-xs font-bold mb-2">
-                            <span class="text-stone-700">התקדמות השבוע</span>
-                            <span id="tab-section-progress-num" class="text-stone-900 font-black">0 / 4 פרקים</span>
-                        </div>
-                        <div class="w-full h-3.5 bg-stone-200/70 rounded-full overflow-hidden p-0.5">
-                            <div id="tab-section-progress-bar" class="h-full rounded-full transition-all duration-500 bg-gradient-to-r from-pink-500 to-rose-500 w-0"></div>
-                        </div>
-                    </div>
-
-                    <!-- 20-min Section Timer with 5-min warning -->
-                    <div class="p-6 bg-gradient-to-br from-pink-50/70 to-rose-50/40 rounded-3xl border border-pink-200/80 text-center space-y-3">
-                        <div class="flex items-center justify-between max-w-sm mx-auto mb-1">
-                            <span class="text-xs font-bold text-pink-900 uppercase">טיימר פרק (20 דק' + התראת 5 דק'):</span>
-                            <select id="tab-section-type-select" onchange="document.getElementById('section-timer-type').value = this.value" class="text-xs bg-white border border-pink-200 rounded-xl px-2.5 py-1 font-bold text-pink-900 outline-none">
-                                <option value="quantitative">חשיבה כמותית (20)</option>
-                                <option value="verbal">חשיבה מילולית (23)</option>
-                            </select>
-                        </div>
-                        <div id="tab-section-timer-num" class="text-4xl md:text-5xl font-black text-pink-950 font-mono tracking-wider">
-                            20:00
-                        </div>
-                        <div class="text-xs text-pink-700 font-medium">
-                            בדיוק ב-5:00 דקות יישמע צליל אזהרה ותוקפץ התראה לסמן ניחושים!
-                        </div>
-                        <div class="flex items-center justify-center gap-2 pt-1">
-                            <button id="tab-section-timer-btn" onclick="toggleSectionTimer()" class="px-5 py-2.5 bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white rounded-2xl font-bold text-xs md:text-sm shadow-md shadow-pink-500/20 active:scale-95 transition-all">
-                                ▶️ התחל פרק
-                            </button>
-                            <button onclick="resetSectionTimer()" class="px-4 py-2.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-2xl font-bold text-xs md:text-sm transition-all">
-                                איפוס
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Action Button & List -->
-                    <div class="space-y-4 pt-2">
-                        <div class="flex items-center justify-between">
-                            <h4 class="font-bold text-stone-900 text-sm">פרקים שנפתרו השבוע:</h4>
-                            <button onclick="openAddSectionModal()" class="px-4 py-2 bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-bold rounded-2xl text-xs flex items-center gap-1.5 shadow-sm active:scale-95 transition-all">
-                                <span>+</span> הזנת תוצאות פרק
-                            </button>
-                        </div>
-                        <div id="tab-sections-list" class="space-y-2">
-                            <!-- Injected by JS -->
-                        </div>
-                    </div>
-
-                </div>
-            </div>
-
-            <!-- ========================================================= -->
-            <!-- TAB 4: MENTAL MATH (חישוב מהיר - כל יום 15 דק') -->
-            <!-- ========================================================= -->
-            <div id="tab-math" class="tab-content hidden space-y-6 animate-fadeIn">
-                <div class="bg-white p-6 md:p-8 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] space-y-6">
-                    
-                    <div class="flex items-center justify-between flex-wrap gap-3">
-                        <div class="flex items-center gap-3">
-                            <div class="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-2xl shadow-2xs text-rose-500">
-                                🧮
-                            </div>
-                            <div>
-                                <h3 class="text-xl font-bold text-stone-900">סטריק חישוב כמותי מהיר</h3>
-                                <p class="text-xs text-stone-500">כל יום 15 דקות: לוח הכפל, חזקות, שורשים ואחוזים ללא מחשבון</p>
-                            </div>
-                        </div>
-                        <span id="tab-math-streak-chip" class="text-xs font-bold text-rose-700 bg-rose-50 px-3 py-1.5 rounded-xl border border-rose-200 flex items-center gap-1.5 shadow-2xs">
-                            <span>🔥</span> 0 ימים ברצף
-                        </span>
-                    </div>
-
-                    <!-- Daily Status -->
-                    <div id="tab-math-status-box" class="p-4 rounded-2xl border text-center transition-all bg-stone-50 border-stone-200">
-                        <div class="text-xs font-semibold text-stone-500">סטטוס להיום:</div>
-                        <div id="tab-math-status-text" class="text-base font-black text-stone-800 mt-1">
-                            ⏳ טרם בוצע היום (יעד: 15 דק')
-                        </div>
-                    </div>
-
-                    <!-- 15-min Interactive Timer -->
-                    <div class="p-6 bg-gradient-to-br from-rose-50/70 to-pink-50/40 rounded-3xl border border-rose-200/80 text-center space-y-3">
-                        <div class="text-xs font-bold text-rose-900 uppercase tracking-wider flex items-center justify-center gap-1.5">
-                            <span>⏱️</span> טיימר 15:00 דקות לתרגול זריז
-                        </div>
-                        <div id="tab-math-timer-num" class="text-4xl md:text-5xl font-black text-rose-950 font-mono tracking-wider">
-                            15:00
-                        </div>
-                        <div class="flex items-center justify-center gap-2 pt-1">
-                            <button id="tab-math-timer-btn" onclick="toggleMathTimer()" class="px-5 py-2.5 bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white rounded-2xl font-bold text-xs md:text-sm shadow-md shadow-rose-500/20 active:scale-95 transition-all">
-                                ▶️ התחל תרגול
-                            </button>
-                            <button onclick="resetMathTimer()" class="px-4 py-2.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-2xl font-bold text-xs md:text-sm transition-all">
-                                איפוס
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Check-in Action -->
-                    <button id="tab-math-checkin-btn" onclick="completeMentalMath()" class="w-full py-4 bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-bold rounded-2xl text-sm flex items-center justify-center gap-2 shadow-md shadow-pink-500/20 active:scale-95 transition-all">
-                        <span>⚡</span> סימנתי שביצעתי 15 דקות עכשיו!
-                    </button>
-
-                </div>
-            </div>
-
-            <!-- ========================================================= -->
-            <!-- TAB 5: ANALYTICS (דיוק וסטטיסטיקה) -->
-            <!-- ========================================================= -->
-            <div id="tab-analytics" class="tab-content hidden space-y-6 animate-fadeIn">
-                <div class="bg-white p-6 md:p-8 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] space-y-6">
-                    
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-3">
-                            <div class="w-12 h-12 rounded-2xl bg-pink-50 border border-pink-100 flex items-center justify-center text-2xl shadow-2xs text-pink-600">
-                                📊
-                            </div>
-                            <div>
-                                <h3 class="text-xl font-bold text-stone-900">מדדי דיוק והתקדמות</h3>
-                                <p class="text-xs text-stone-500">מעקב אחוזי הצלחה נפרד לפרקי כמותי ולפרקי מילולי</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <!-- Quant Stats -->
-                        <div class="p-5 bg-gradient-to-br from-blue-50/80 to-indigo-50/40 rounded-3xl border border-blue-100 space-y-2">
-                            <div class="flex items-center justify-between">
-                                <span class="text-xs font-bold text-blue-900 flex items-center gap-1.5">
-                                    <span>📐</span> חשיבה כמותית (מתוך 20)
-                                </span>
-                                <span id="stat-quant-count" class="text-xs text-blue-600 font-bold">0 פרקים</span>
-                            </div>
-                            <div class="flex items-baseline justify-between pt-2">
-                                <div id="stat-quant-avg" class="text-3xl font-black text-blue-950">- / 20</div>
-                                <div id="stat-quant-pct" class="text-base font-black text-blue-700">- דיוק</div>
-                            </div>
-                        </div>
-
-                        <!-- Verbal Stats -->
-                        <div class="p-5 bg-gradient-to-br from-purple-50/80 to-pink-50/40 rounded-3xl border border-purple-100 space-y-2">
-                            <div class="flex items-center justify-between">
-                                <span class="text-xs font-bold text-purple-900 flex items-center gap-1.5">
-                                    <span>📖</span> חשיבה מילולית (מתוך 23)
-                                </span>
-                                <span id="stat-verbal-count" class="text-xs text-purple-600 font-bold">0 פרקים</span>
-                            </div>
-                            <div class="flex items-baseline justify-between pt-2">
-                                <div id="stat-verbal-avg" class="text-3xl font-black text-purple-950">- / 23</div>
-                                <div id="stat-verbal-pct" class="text-base font-black text-purple-700">- דיוק</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Backup / Reset Area -->
-                    <div class="pt-4 border-t border-stone-100 flex items-center justify-between text-xs text-stone-500">
-                        <span>גיבוי ונתונים מקומיים</span>
-                        <div class="flex gap-3">
-                            <button onclick="exportData()" class="text-pink-600 font-bold hover:underline">ייצוא קובץ גיבוי 💾</button>
-                            <span>•</span>
-                            <label class="text-pink-600 font-bold hover:underline cursor-pointer">
-                                ייבוא גיבוי 📥
-                                <input type="file" class="hidden" accept=".json" onchange="importData(event)">
-                            </label>
-                        </div>
-                    </div>
-
-                </div>
-            </div>
-
-        </main>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- MODAL: QUICK ACTION (תיעוד מהיר מהסיידבר) -->
-    <!-- ============================================================= -->
-    <div id="modal-quick-action" class="hidden fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[80] flex items-end md:items-center justify-center p-0 md:p-4">
-        <div class="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-sm p-6 shadow-2xl animate-popIn pb-safe-bottom space-y-3">
-            <div class="flex justify-between items-center mb-2">
-                <h3 class="font-bold text-base text-stone-900">מה תרצי לתעד עכשיו? 🎯</h3>
-                <button onclick="closeModal('modal-quick-action')" class="text-stone-400 p-2 rounded-full hover:bg-stone-100">✕</button>
-            </div>
-            <button onclick="closeModal('modal-quick-action'); openAddSectionModal();" class="w-full p-4 bg-pink-50 hover:bg-pink-100 text-pink-700 rounded-2xl font-bold text-sm flex items-center gap-3 transition-all active:scale-95 border border-pink-100">
-                <span class="text-xl">⏱️</span>
-                <span class="text-right flex-1">הזנת תוצאת פרק (כמותי / מילולי)</span>
-            </button>
-            <button onclick="closeModal('modal-quick-action'); openAddEssayModal();" class="w-full p-4 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-2xl font-bold text-sm flex items-center gap-3 transition-all active:scale-95 border border-amber-100">
-                <span class="text-xl">✍️</span>
-                <span class="text-right flex-1">תיעוד מטלת כתיבה (חיבור)</span>
-            </button>
-            <button onclick="closeModal('modal-quick-action'); completeMentalMath();" class="w-full p-4 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-2xl font-bold text-sm flex items-center gap-3 transition-all active:scale-95 border border-rose-100">
-                <span class="text-xl">🧮</span>
-                <span class="text-right flex-1">סימון 15 דק' חישוב מהיר היום</span>
-            </button>
-        </div>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- MODAL: ADD ESSAY -->
-    <!-- ============================================================= -->
-    <div id="modal-essay" class="hidden fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[80] flex items-end md:items-center justify-center p-0 md:p-4">
-        <div class="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-popIn pb-safe-bottom">
-            <div class="flex justify-between items-center mb-5">
-                <h3 class="font-bold text-xl text-stone-900 flex items-center gap-2">
-                    <span class="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center text-sm">✍️</span>
-                    תיעוד מטלת כתיבה
-                </h3>
-                <button onclick="closeModal('modal-essay')" class="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
-            </div>
-            <form onsubmit="handleSaveEssay(event)" class="space-y-4">
-                <div>
-                    <label class="text-xs font-bold text-stone-500 block mb-1">נושא החיבור / מקור</label>
-                    <input type="text" id="essay-topic-input" required placeholder="למשל: הגבלת שימוש ברשתות חברתיות לנוער" class="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-pink-400 outline-none">
-                </div>
-                <div class="grid grid-cols-2 gap-3">
-                    <div>
-                        <label class="text-xs font-bold text-stone-500 block mb-1">תאריך כתיבה</label>
-                        <input type="date" id="essay-date-input" class="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-pink-400 outline-none">
-                    </div>
-                    <div>
-                        <label class="text-xs font-bold text-stone-500 block mb-1">זמן שהוקדש</label>
-                        <input type="text" readonly value="30 דקות בדיוק ⏱️" class="w-full p-3 bg-stone-100 border border-stone-200 rounded-2xl text-sm font-bold text-stone-600 outline-none">
-                    </div>
-                </div>
-                <div>
-                    <label class="text-xs font-bold text-stone-500 block mb-1">הערות / משוב עצמי (אופציונלי)</label>
-                    <textarea id="essay-notes-input" rows="2" placeholder="עמידה בזמנים? שמירה על פסקת איזון? עושר לשוני..." class="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-pink-400 outline-none"></textarea>
-                </div>
-                <div class="pt-2 flex gap-3">
-                    <button type="button" onclick="closeModal('modal-essay')" class="flex-1 py-3 text-stone-500 font-bold bg-stone-100 rounded-2xl text-sm hover:bg-stone-200">ביטול</button>
-                    <button type="submit" class="flex-1 py-3 text-white font-bold bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 rounded-2xl text-sm shadow-md shadow-pink-500/20">שמירה לסטריק ✨</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- MODAL: ADD SECTION WITH MISTAKE ANALYSIS -->
-    <!-- ============================================================= -->
-    <div id="modal-section" class="hidden fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[80] flex items-end md:items-center justify-center p-0 md:p-4">
-        <div class="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-popIn max-h-[90vh] overflow-y-auto custom-scrollbar pb-safe-bottom">
-            <div class="flex justify-between items-center mb-5">
-                <h3 class="font-bold text-xl text-stone-900 flex items-center gap-2">
-                    <span class="w-8 h-8 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center text-sm">⏱️</span>
-                    הזנת תוצאות פרק ותחקור
-                </h3>
-                <button onclick="closeModal('modal-section')" class="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
-            </div>
-            <form onsubmit="handleSaveSection(event)" class="space-y-4">
-                <!-- Section Type Toggle -->
-                <div>
-                    <label class="text-xs font-bold text-stone-500 block mb-1">סוג הפרק</label>
-                    <div class="grid grid-cols-2 gap-2 bg-stone-100 p-1.5 rounded-2xl">
-                        <button type="button" id="type-btn-quant" onclick="setModalSectionType('quantitative')" class="py-2 rounded-xl text-xs font-bold transition-all bg-white text-pink-700 shadow-xs">
-                            חשיבה כמותית (מתוך 20)
-                        </button>
-                        <button type="button" id="type-btn-verbal" onclick="setModalSectionType('verbal')" class="py-2 rounded-xl text-xs font-bold transition-all text-stone-500">
-                            חשיבה מילולית (מתוך 23)
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Correct Count Input -->
-                <div>
-                    <label id="section-correct-label" class="text-xs font-bold text-stone-500 block mb-1">
-                        כמה תשובות נכונות צדקת? (מתוך 20)
-                    </label>
-                    <div class="flex items-center gap-3">
-                        <input type="number" id="section-correct-input" min="0" max="20" required placeholder="למשל 18" oninput="updateCorrectCalculation()" class="flex-1 p-3 bg-stone-50 border border-stone-200 rounded-2xl text-lg font-black text-center focus:border-pink-400 outline-none">
-                        <div id="section-max-label" class="text-sm font-black text-stone-500">מתוך 20</div>
-                    </div>
-                    <div id="section-calc-result" class="hidden mt-1.5 text-xs font-bold text-pink-600 text-center"></div>
-                </div>
-
-                <!-- Mistake Analysis (Idea 2) -->
-                <div id="mistake-analysis-area" class="hidden p-3.5 bg-rose-50/70 border border-rose-200/80 rounded-2xl space-y-2">
-                    <div class="text-xs font-bold text-rose-900 flex items-center gap-1.5">
-                        <span>🔍</span> תחקור מהיר: ממה נבעו הטעויות?
-                    </div>
-                    <div class="grid grid-cols-2 gap-1.5">
-                        <button type="button" onclick="toggleMistakeBtn(this, 'careless')" class="mistake-btn p-2 rounded-xl text-[11px] font-bold text-right transition-all border bg-white text-stone-700 border-stone-200">
-                            🤦‍♀️ חוסר תשומת לב
-                        </button>
-                        <button type="button" onclick="toggleMistakeBtn(this, 'time')" class="mistake-btn p-2 rounded-xl text-[11px] font-bold text-right transition-all border bg-white text-stone-700 border-stone-200">
-                            ⏰ ניהול זמן / היתקעות
-                        </button>
-                        <button type="button" onclick="toggleMistakeBtn(this, 'gap')" class="mistake-btn p-2 rounded-xl text-[11px] font-bold text-right transition-all border bg-white text-stone-700 border-stone-200">
-                            ❌ פער בחומר / ידע
-                        </button>
-                        <button type="button" onclick="toggleMistakeBtn(this, 'guess')" class="mistake-btn p-2 rounded-xl text-[11px] font-bold text-right transition-all border bg-white text-stone-700 border-stone-200">
-                            🎲 ניחוש
-                        </button>
-                    </div>
-                    <input type="text" id="section-mistake-notes" placeholder="מסקנה קצרה מהטעויות (מה לשפר בפעם הבאה?)" class="w-full p-2.5 bg-white border border-stone-200 rounded-xl text-xs font-medium outline-none focus:border-rose-400">
-                </div>
-
-                <div class="grid grid-cols-2 gap-3">
-                    <div>
-                        <label class="text-xs font-bold text-stone-500 block mb-1">זמן (דקות)</label>
-                        <input type="number" id="section-time-input" value="20" class="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-pink-400 outline-none">
-                    </div>
-                    <div>
-                        <label class="text-xs font-bold text-stone-500 block mb-1">תאריך פתירה</label>
-                        <input type="date" id="section-date-input" class="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-pink-400 outline-none">
-                    </div>
-                </div>
-
-                <div>
-                    <label class="text-xs font-bold text-stone-500 block mb-1">מקור הפרק / מועד (אופציונלי)</label>
-                    <input type="text" id="section-source-input" placeholder="למשל: סימולציה 3 פרק 1, מועד סתיו 2025" class="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-pink-400 outline-none">
-                </div>
-
-                <div class="pt-2 flex gap-3">
-                    <button type="button" onclick="closeModal('modal-section')" class="flex-1 py-3 text-stone-500 font-bold bg-stone-100 rounded-2xl text-sm hover:bg-stone-200">ביטול</button>
-                    <button type="submit" class="flex-1 py-3 text-white font-bold bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 rounded-2xl text-sm shadow-md shadow-pink-500/20">שמירה לסטריק ✨</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- MODAL: VIEW MISTAKE DETAILS -->
-    <!-- ============================================================= -->
-    <div id="modal-view-mistake" class="hidden fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[85] flex items-end md:items-center justify-center p-0 md:p-4">
-        <div class="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-popIn pb-safe-bottom">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="font-bold text-lg text-stone-900 flex items-center gap-2">
-                    <span>📝</span> <span id="view-mistake-title">תחקור פרק</span>
-                </h3>
-                <button onclick="closeModal('modal-view-mistake')" class="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
-            </div>
-            <div class="space-y-3 text-sm">
-                <div class="p-3 bg-stone-50 rounded-2xl flex justify-between items-center">
-                    <span class="font-bold text-stone-600">תוצאה:</span>
-                    <span id="view-mistake-score" class="font-black text-pink-700">-</span>
-                </div>
-                <div class="p-3 bg-stone-50 rounded-2xl flex justify-between items-center">
-                    <span class="font-bold text-stone-600">טעויות:</span>
-                    <span id="view-mistake-count" class="font-black text-rose-600">-</span>
-                </div>
-                <div>
-                    <div class="text-xs font-bold text-stone-500 mb-1.5">סיבות לטעויות:</div>
-                    <div id="view-mistake-reasons" class="flex gap-1.5 flex-wrap"></div>
-                </div>
-                <div id="view-mistake-notes-box" class="p-3 bg-pink-50/70 rounded-2xl border border-pink-200 text-xs text-stone-700">
-                    <div class="font-bold text-pink-900 mb-0.5">מסקנות מהתחקור:</div>
-                    <div id="view-mistake-notes">-</div>
-                </div>
-                <button onclick="closeModal('modal-view-mistake')" class="w-full py-3 bg-stone-900 text-white rounded-2xl font-bold text-xs mt-3 active:scale-95 transition-all">
-                    סגור תחקור
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- MODAL: CONFIGURE EXAM DATE -->
-    <!-- ============================================================= -->
-    <div id="modal-exam-date" class="hidden fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[80] flex items-end md:items-center justify-center p-0 md:p-4">
-        <div class="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-sm p-6 shadow-2xl animate-popIn pb-safe-bottom">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="font-bold text-lg text-stone-900 flex items-center gap-2">
-                    <span>⏳</span> מועד הבחינה שלך
-                </h3>
-                <button onclick="closeModal('modal-exam-date')" class="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
-            </div>
-            <form onsubmit="handleSaveExamDate(event)" class="space-y-4">
-                <div>
-                    <label class="text-xs font-bold text-stone-500 block mb-1">בחרי את תאריך המועד:</label>
-                    <input type="date" id="exam-target-date-input" required class="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-bold focus:border-pink-400 outline-none">
-                </div>
-                <div class="flex gap-2">
-                    <button type="button" onclick="closeModal('modal-exam-date')" class="flex-1 py-3 text-stone-500 font-bold bg-stone-100 rounded-2xl text-sm">ביטול</button>
-                    <button type="submit" class="flex-1 py-3 text-white font-bold bg-gradient-to-r from-pink-500 to-rose-500 rounded-2xl text-sm">שמירה</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- ============================================================= -->
-    <!-- JAVASCRIPT LOGIC -->
-    <!-- ============================================================= -->
+    
+    <!-- React, ReactDOM, Babel & Chart.js -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="js/pdf.min.js?v=20261003_4"></script>
     <script>
-        // Audio Chime
-        function playChime(type = 'chime') {
-            try {
-                const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-
-                if (type === 'warning') {
-                    osc.frequency.setValueAtTime(440, ctx.currentTime);
-                    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
-                    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-                    osc.start();
-                    osc.stop(ctx.currentTime + 0.4);
-                } else {
-                    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
-                    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
-                    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-                    osc.start();
-                    osc.stop(ctx.currentTime + 0.35);
-                }
-            } catch(e) {}
+        if (typeof window !== 'undefined' && window.pdfjsLib) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'js/pdf.worker.min.js?v=20261003_4';
         }
-
-        function showToast(message, type = 'success') {
-            const container = document.getElementById('toast-container');
-            const el = document.createElement('div');
-            el.className = `p-4 rounded-2xl shadow-xl text-sm font-bold flex items-center gap-2 border animate-popIn ${
-                type === 'success' ? 'bg-pink-50 text-pink-800 border-pink-200' :
-                type === 'warning' ? 'bg-amber-50 text-amber-800 border-amber-200' :
-                'bg-stone-50 text-stone-800 border-stone-200'
-            }`;
-            el.innerHTML = `<span>${type === 'success' ? '✨' : type === 'warning' ? '⚠️' : 'ℹ️'}</span> <span>${message}</span>`;
-            container.appendChild(el);
-            setTimeout(() => {
-                el.style.opacity = '0';
-                el.style.transform = 'translateY(-10px)';
-                el.style.transition = 'all 0.3s ease';
-                setTimeout(() => el.remove(), 300);
-            }, 3000);
-        }
-
-        // Data Management
-        const STORAGE_KEY = 'psychoStreak_data_v1';
-
-        function loadData() {
-            try {
-                const saved = localStorage.getItem(STORAGE_KEY);
-                if (saved) return JSON.parse(saved);
-            } catch(e) {}
-            return {
-                examDate: '2026-12-25',
-                essays: [],
-                mentalMathLogs: [],
-                sections: []
-            };
-        }
-
-        let appData = loadData();
-
-        function saveData() {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
-            renderApp();
-        }
-
-        // Date Helpers
-        function getWeekBounds(baseDate = new Date()) {
-            const d = new Date(baseDate);
-            const start = new Date(d);
-            start.setDate(d.getDate() - d.getDay()); // Sunday 00:00:00
-            start.setHours(0,0,0,0);
-            const end = new Date(start);
-            end.setDate(start.getDate() + 6); // Saturday 23:59:59
-            end.setHours(23,59,59,999);
-            return { start, end };
-        }
-
-        function toIso(d = new Date()) {
-            const date = new Date(d);
-            const y = date.getFullYear();
-            const m = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
-            return `${y}-${m}-${day}`;
-        }
-
-        function calcDailyStreak(logs) {
-            if (!logs || logs.length === 0) return 0;
-            const dateSet = new Set(logs.map(l => l.date));
-            let streak = 0;
-            let check = new Date();
-            const tStr = toIso(check);
-            if (dateSet.has(tStr)) {
-                streak++;
-                check.setDate(check.getDate() - 1);
-            } else {
-                check.setDate(check.getDate() - 1);
-                if (!dateSet.has(toIso(check))) return 0;
-            }
-            while (true) {
-                const s = toIso(check);
-                if (dateSet.has(s)) {
-                    streak++;
-                    check.setDate(check.getDate() - 1);
-                } else {
-                    break;
-                }
-            }
-            return streak;
-        }
-
-        function calcWeeklyStreak(items, targetPerWeek) {
-            if (!items || items.length === 0) return 0;
-            const now = new Date();
-            const { start: weekStart, end: weekEnd } = getWeekBounds(now);
-
-            const countInWeek = (s, e) => items.filter(it => {
-                const d = new Date(it.date || it.createdAt);
-                return !isNaN(d.getTime()) && d >= s && d <= e;
-            }).length;
-
-            let streak = 0;
-            if (countInWeek(weekStart, weekEnd) >= targetPerWeek) streak++;
-
-            let checkStart = new Date(weekStart);
-            while (true) {
-                checkStart.setDate(checkStart.getDate() - 7);
-                const checkEnd = new Date(checkStart);
-                checkEnd.setDate(checkStart.getDate() + 6);
-                checkEnd.setHours(23,59,59,999);
-                if (countInWeek(checkStart, checkEnd) >= targetPerWeek) {
-                    streak++;
-                } else {
-                    break;
-                }
-            }
-            return streak;
-        }
-
-        function calcMasterStreak() {
-            const allDates = new Set();
-            (appData.mentalMathLogs || []).forEach(l => allDates.add(l.date));
-            (appData.essays || []).forEach(e => allDates.add(e.date));
-            (appData.sections || []).forEach(s => allDates.add(s.date));
-
-            if (allDates.size === 0) return 0;
-            let streak = 0;
-            let check = new Date();
-            if (allDates.has(toIso(check))) {
-                streak++;
-                check.setDate(check.getDate() - 1);
-            } else {
-                check.setDate(check.getDate() - 1);
-                if (!allDates.has(toIso(check))) return 0;
-            }
-            while (true) {
-                const s = toIso(check);
-                if (allDates.has(s)) {
-                    streak++;
-                    check.setDate(check.getDate() - 1);
-                } else {
-                    break;
-                }
-            }
-            return streak;
-        }
-
-        // =============================================================
-        // TAB SWITCHING (Router)
-        // =============================================================
-        let currentTab = 'dashboard';
-
-        function switchTab(tabName) {
-            currentTab = tabName;
-
-            // Hide all contents
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-
-            // Show selected content
-            const targetEl = document.getElementById(`tab-${tabName}`);
-            if (targetEl) targetEl.classList.remove('hidden');
-
-            // Update desktop sidebar buttons
-            document.querySelectorAll('.nav-btn').forEach(btn => {
-                btn.className = 'nav-btn flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 text-stone-600 hover:bg-stone-50 hover:text-stone-900';
-            });
-            const activeDesktopBtn = document.getElementById(`nav-btn-${tabName}`);
-            if (activeDesktopBtn) {
-                activeDesktopBtn.className = 'nav-btn flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 bg-pink-50 text-pink-700 font-bold shadow-xs';
-            }
-
-            // Update mobile bottom nav buttons
-            document.querySelectorAll('.mob-nav-btn').forEach(btn => {
-                btn.className = 'mob-nav-btn flex flex-col items-center gap-1 py-1.5 px-3 rounded-2xl text-[11px] font-medium text-stone-500 hover:text-stone-800 flex-1';
-            });
-            const activeMobBtn = document.getElementById(`mob-nav-${tabName}`);
-            if (activeMobBtn) {
-                activeMobBtn.className = 'mob-nav-btn flex flex-col items-center gap-1 py-1.5 px-3 rounded-2xl text-[11px] font-bold text-pink-700 bg-pink-50 flex-1';
-            }
-
-            // Scroll to top
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-        }
-
-        // =============================================================
-        // TIMERS LOGIC
-        // =============================================================
-
-        // 1. Mental Math Timer (15:00)
-        let mathTimerSecs = 15 * 60;
-        let isMathTimerRunning = false;
-        let mathInterval = null;
-
-        function toggleMathTimer() {
-            const btnTab = document.getElementById('tab-math-timer-btn');
-            if (isMathTimerRunning) {
-                clearInterval(mathInterval);
-                isMathTimerRunning = false;
-                if (btnTab) btnTab.innerText = '▶️ המשך';
-            } else {
-                isMathTimerRunning = true;
-                if (btnTab) btnTab.innerText = '⏸️ השהה';
-                mathInterval = setInterval(() => {
-                    if (mathTimerSecs <= 1) {
-                        clearInterval(mathInterval);
-                        isMathTimerRunning = false;
-                        mathTimerSecs = 15 * 60;
-                        updateMathTimerDisplay();
-                        if (btnTab) btnTab.innerText = '▶️ התחל תרגול';
-                        playChime('chime');
-                        completeMentalMath();
-                    } else {
-                        mathTimerSecs--;
-                        updateMathTimerDisplay();
-                    }
-                }, 1000);
-            }
-        }
-
-        function resetMathTimer() {
-            clearInterval(mathInterval);
-            isMathTimerRunning = false;
-            mathTimerSecs = 15 * 60;
-            updateMathTimerDisplay();
-            const btnTab = document.getElementById('tab-math-timer-btn');
-            if (btnTab) btnTab.innerText = '▶️ התחל תרגול';
-        }
-
-        function updateMathTimerDisplay() {
-            const m = Math.floor(mathTimerSecs / 60);
-            const s = mathTimerSecs % 60;
-            const str = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-            const tabNum = document.getElementById('tab-math-timer-num');
-            if (tabNum) tabNum.innerText = str;
-        }
-
-        // 2. Section Timer (20:00 with 5-minute warning)
-        let sectionTimerSecs = 20 * 60;
-        let isSectionTimerRunning = false;
-        let sectionInterval = null;
-        let sectionWarningFired = false;
-
-        function toggleSectionTimer() {
-            const btnTab = document.getElementById('tab-section-timer-btn');
-            if (isSectionTimerRunning) {
-                clearInterval(sectionInterval);
-                isSectionTimerRunning = false;
-                if (btnTab) btnTab.innerText = '▶️ המשך';
-            } else {
-                isSectionTimerRunning = true;
-                if (btnTab) btnTab.innerText = '⏸️ השהה';
-                sectionInterval = setInterval(() => {
-                    if (sectionTimerSecs === 300 && !sectionWarningFired) {
-                        sectionWarningFired = true;
-                        playChime('warning');
-                        document.getElementById('warning-banner').classList.remove('hidden');
-                    }
-                    if (sectionTimerSecs <= 1) {
-                        clearInterval(sectionInterval);
-                        isSectionTimerRunning = false;
-                        sectionTimerSecs = 20 * 60;
-                        sectionWarningFired = false;
-                        updateSectionTimerDisplay();
-                        if (btnTab) btnTab.innerText = '▶️ התחל פרק';
-                        playChime('chime');
-                        const sel = document.getElementById('tab-section-type-select').value;
-                        setModalSectionType(sel);
-                        openAddSectionModal();
-                        showToast('הסתיים הזמן לפרק! נא להזין כמה צדקת 🎯', 'info');
-                    } else {
-                        sectionTimerSecs--;
-                        updateSectionTimerDisplay();
-                    }
-                }, 1000);
-            }
-        }
-
-        function resetSectionTimer() {
-            clearInterval(sectionInterval);
-            isSectionTimerRunning = false;
-            sectionTimerSecs = 20 * 60;
-            sectionWarningFired = false;
-            updateSectionTimerDisplay();
-            const btnTab = document.getElementById('tab-section-timer-btn');
-            if (btnTab) btnTab.innerText = '▶️ התחל פרק';
-            dismissWarning();
-        }
-
-        function updateSectionTimerDisplay() {
-            const m = Math.floor(sectionTimerSecs / 60);
-            const s = sectionTimerSecs % 60;
-            const str = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-            const tabNum = document.getElementById('tab-section-timer-num');
-            if (tabNum) tabNum.innerText = str;
-        }
-
-        function dismissWarning() {
-            document.getElementById('warning-banner').classList.add('hidden');
-        }
-
-        // 3. Guided Essay Timer (30:00 with 3 phases)
-        let essayTimerSecs = 30 * 60;
-        let isEssayTimerRunning = false;
-        let essayInterval = null;
-
-        function updateEssayPhaseDisplay() {
-            const elapsed = 30 * 60 - essayTimerSecs;
-            const badge = document.getElementById('tab-essay-phase-badge');
-            if (elapsed < 5 * 60) {
-                const rem = Math.ceil((300 - elapsed) / 60);
-                badge.innerText = `שלב 1: תכנון, עמדה וסיעור מוחות (עוד ${rem} דק')`;
-                badge.className = 'text-xs font-bold px-3 py-1 rounded-full text-amber-800 bg-amber-100 border border-amber-200 inline-block';
-            } else if (elapsed < 25 * 60) {
-                const rem = Math.ceil((1500 - elapsed) / 60);
-                badge.innerText = `שלב 2: כתיבת הפסקאות (עוד ${rem} דק')`;
-                badge.className = 'text-xs font-bold px-3 py-1 rounded-full text-pink-800 bg-pink-100 border border-pink-200 inline-block';
-            } else {
-                const rem = Math.ceil((1800 - elapsed) / 60);
-                badge.innerText = `שלב 3: הגהה, פיסוק וליטוש לשוני (עוד ${rem} דק')`;
-                badge.className = 'text-xs font-bold px-3 py-1 rounded-full text-emerald-800 bg-emerald-100 border border-emerald-200 inline-block';
-            }
-        }
-
-        function toggleEssayTimer() {
-            const btnTab = document.getElementById('tab-essay-timer-btn');
-            if (isEssayTimerRunning) {
-                clearInterval(essayInterval);
-                isEssayTimerRunning = false;
-                if (btnTab) btnTab.innerText = '▶️ המשך';
-            } else {
-                isEssayTimerRunning = true;
-                if (btnTab) btnTab.innerText = '⏸️ השהה';
-                essayInterval = setInterval(() => {
-                    if (essayTimerSecs <= 1) {
-                        clearInterval(essayInterval);
-                        isEssayTimerRunning = false;
-                        essayTimerSecs = 30 * 60;
-                        updateEssayTimerDisplay();
-                        if (btnTab) btnTab.innerText = '▶️ התחל כתיבה';
-                        playChime('chime');
-                        openAddEssayModal();
-                        showToast('הסתיים זמן החיבור (30 דקות)! נפתח טופס השמירה ✍️', 'success');
-                    } else {
-                        essayTimerSecs--;
-                        updateEssayTimerDisplay();
-                        updateEssayPhaseDisplay();
-                    }
-                }, 1000);
-            }
-        }
-
-        function resetEssayTimer() {
-            clearInterval(essayInterval);
-            isEssayTimerRunning = false;
-            essayTimerSecs = 30 * 60;
-            updateEssayTimerDisplay();
-            const badge = document.getElementById('tab-essay-phase-badge');
-            badge.innerText = 'שלב 1: תכנון, עמדה וסיעור מוחות (5 דק\')';
-            badge.className = 'text-xs font-bold px-3 py-1 rounded-full text-amber-800 bg-amber-100 border border-amber-200 inline-block';
-            const btnTab = document.getElementById('tab-essay-timer-btn');
-            if (btnTab) btnTab.innerText = '▶️ התחל כתיבה';
-        }
-
-        function updateEssayTimerDisplay() {
-            const m = Math.floor(essayTimerSecs / 60);
-            const s = essayTimerSecs % 60;
-            const str = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-            const tabNum = document.getElementById('tab-essay-timer-num');
-            if (tabNum) tabNum.innerText = str;
-        }
-
-        // =============================================================
-        // ACTIONS & MODALS
-        // =============================================================
-        function completeMentalMath() {
-            const todayStr = toIso();
-            const alreadyDone = (appData.mentalMathLogs || []).some(l => l.date === todayStr);
-            if (alreadyDone) {
-                showToast('כבר השלמת את יעד החישוב המהיר להיום! אלופה 🔥', 'info');
-                return;
-            }
-
-            appData.mentalMathLogs.push({
-                id: 'pmm_' + Date.now(),
-                date: todayStr,
-                durationMinutes: 15,
-                timestamp: Date.now()
-            });
-
-            playChime('chime');
-            saveData();
-            showToast('15 דקות חישוב מהיר הושלמו! הרצף נשמר 🔥', 'success');
-        }
-
-        function openAddEssayModal() {
-            document.getElementById('essay-date-input').value = toIso();
-            document.getElementById('essay-topic-input').value = '';
-            document.getElementById('essay-notes-input').value = '';
-            document.getElementById('modal-essay').classList.remove('hidden');
-        }
-
-        function handleSaveEssay(e) {
-            e.preventDefault();
-            const topic = document.getElementById('essay-topic-input').value.trim() || 'מטלת כתיבה שבועית';
-            const date = document.getElementById('essay-date-input').value || toIso();
-            const notes = document.getElementById('essay-notes-input').value.trim();
-
-            appData.essays.unshift({
-                id: 'pe_' + Date.now(),
-                topic,
-                date,
-                notes,
-                createdAt: Date.now()
-            });
-
-            playChime('chime');
-            closeModal('modal-essay');
-            saveData();
-            showToast('החיבור נשמר בהצלחה לסטריק! ✍️✨', 'success');
-        }
-
-        function deleteEssay(id) {
-            if (!confirm('האם למחוק חיבור זה מהרשימה?')) return;
-            appData.essays = appData.essays.filter(e => e.id !== id);
-            saveData();
-            showToast('החיבור נמחק', 'info');
-        }
-
-        // Section Modal Logic
-        let currentModalSectionType = 'quantitative';
-        let currentMistakeReasons = [];
-
-        function setModalSectionType(type) {
-            currentModalSectionType = type;
-            const btnQuant = document.getElementById('type-btn-quant');
-            const btnVerbal = document.getElementById('type-btn-verbal');
-            const maxLabel = document.getElementById('section-max-label');
-            const correctLabel = document.getElementById('section-correct-label');
-            const input = document.getElementById('section-correct-input');
-
-            if (type === 'quantitative') {
-                btnQuant.className = 'py-2 rounded-xl text-xs font-bold transition-all bg-white text-pink-700 shadow-xs';
-                btnVerbal.className = 'py-2 rounded-xl text-xs font-bold transition-all text-stone-500';
-                maxLabel.innerText = 'מתוך 20';
-                correctLabel.innerText = 'כמה תשובות נכונות צדקת? (מתוך 20)';
-                input.max = 20;
-            } else {
-                btnVerbal.className = 'py-2 rounded-xl text-xs font-bold transition-all bg-white text-pink-700 shadow-xs';
-                btnQuant.className = 'py-2 rounded-xl text-xs font-bold transition-all text-stone-500';
-                maxLabel.innerText = 'מתוך 23';
-                correctLabel.innerText = 'כמה תשובות נכונות צדקת? (מתוך 23)';
-                input.max = 23;
-            }
-            updateCorrectCalculation();
-        }
-
-        function openAddSectionModal() {
-            setModalSectionType('quantitative');
-            document.getElementById('section-correct-input').value = '';
-            document.getElementById('section-source-input').value = '';
-            document.getElementById('section-time-input').value = '20';
-            document.getElementById('section-date-input').value = toIso();
-            document.getElementById('section-mistake-notes').value = '';
-            currentMistakeReasons = [];
-            document.querySelectorAll('.mistake-btn').forEach(btn => {
-                btn.className = 'mistake-btn p-2 rounded-xl text-[11px] font-bold text-right transition-all border bg-white text-stone-700 border-stone-200';
-            });
-            document.getElementById('mistake-analysis-area').classList.add('hidden');
-            document.getElementById('section-calc-result').classList.add('hidden');
-            document.getElementById('modal-section').classList.remove('hidden');
-        }
-
-        function updateCorrectCalculation() {
-            const input = document.getElementById('section-correct-input');
-            const val = parseInt(input.value, 10);
-            const max = currentModalSectionType === 'quantitative' ? 20 : 23;
-            const resEl = document.getElementById('section-calc-result');
-            const mistakeArea = document.getElementById('mistake-analysis-area');
-
-            if (!isNaN(val) && val >= 0 && val <= max) {
-                const pct = Math.round((val / max) * 100);
-                resEl.innerText = `דיוק: ${pct}% הצלחה! 🎯 ${val < max ? `(${max - val} טעויות)` : ''}`;
-                resEl.classList.remove('hidden');
-
-                if (val < max) {
-                    mistakeArea.classList.remove('hidden');
-                } else {
-                    mistakeArea.classList.add('hidden');
-                }
-            } else {
-                resEl.classList.add('hidden');
-                mistakeArea.classList.add('hidden');
-            }
-        }
-
-        function toggleMistakeBtn(btn, reason) {
-            if (currentMistakeReasons.includes(reason)) {
-                currentMistakeReasons = currentMistakeReasons.filter(r => r !== reason);
-                btn.className = 'mistake-btn p-2 rounded-xl text-[11px] font-bold text-right transition-all border bg-white text-stone-700 border-stone-200';
-            } else {
-                currentMistakeReasons.push(reason);
-                btn.className = 'mistake-btn p-2 rounded-xl text-[11px] font-bold text-right transition-all border bg-rose-500 text-white border-rose-500 shadow-xs';
-            }
-        }
-
-        function handleSaveSection(e) {
-            e.preventDefault();
-            const maxQ = currentModalSectionType === 'quantitative' ? 20 : 23;
-            const correct = parseInt(document.getElementById('section-correct-input').value, 10);
-
-            if (isNaN(correct) || correct < 0 || correct > maxQ) {
-                showToast(`מספר תשובות לא תקין (חייב להיות 0-${maxQ})`, 'warning');
-                return;
-            }
-
-            const mistakes = maxQ - correct;
-            const newSec = {
-                id: 'ps_' + Date.now(),
-                type: currentModalSectionType,
-                correct,
-                total: maxQ,
-                mistakes,
-                percentage: Math.round((correct / maxQ) * 100),
-                source: document.getElementById('section-source-input').value.trim() || (currentModalSectionType === 'quantitative' ? 'פרק כמותי' : 'פרק מילולי'),
-                timeMinutes: parseInt(document.getElementById('section-time-input').value, 10) || 20,
-                date: document.getElementById('section-date-input').value || toIso(),
-                mistakeReasons: [...currentMistakeReasons],
-                mistakeNote: document.getElementById('section-mistake-notes').value.trim(),
-                createdAt: Date.now()
-            };
-
-            appData.sections.unshift(newSec);
-            playChime('chime');
-            closeModal('modal-section');
-            saveData();
-            showToast(`הפרק תועד בהצלחה! ${correct}/${maxQ} (${newSec.percentage}%) 🎯`, 'success');
-        }
-
-        function deleteSection(id) {
-            if (!confirm('האם למחוק פרק זה מהרשימה?')) return;
-            appData.sections = appData.sections.filter(s => s.id !== id);
-            saveData();
-            showToast('הפרק נמחק', 'info');
-        }
-
-        function viewMistakeDetails(id) {
-            const sec = appData.sections.find(s => s.id === id);
-            if (!sec) return;
-
-            document.getElementById('view-mistake-title').innerText = `תחקור פרק: ${sec.source}`;
-            document.getElementById('view-mistake-score').innerText = `${sec.correct}/${sec.total} (${sec.percentage}%)`;
-            document.getElementById('view-mistake-count').innerText = `${sec.mistakes} טעויות`;
-
-            const reasonsContainer = document.getElementById('view-mistake-reasons');
-            reasonsContainer.innerHTML = '';
-            if (sec.mistakeReasons && sec.mistakeReasons.length > 0) {
-                const map = {
-                    careless: '🤦‍♀️ חוסר תשומת לב',
-                    time: '⏰ ניהול זמן',
-                    gap: '❌ פער בחומר',
-                    guess: '🎲 ניחוש'
-                };
-                sec.mistakeReasons.forEach(r => {
-                    const tag = document.createElement('span');
-                    tag.className = 'px-2.5 py-1 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold';
-                    tag.innerText = map[r] || r;
-                    reasonsContainer.appendChild(tag);
-                });
-            } else {
-                reasonsContainer.innerHTML = '<span class="text-xs text-stone-400">לא סומנו סיבות ספציפיות</span>';
-            }
-
-            const notesBox = document.getElementById('view-mistake-notes-box');
-            if (sec.mistakeNote) {
-                document.getElementById('view-mistake-notes').innerText = sec.mistakeNote;
-                notesBox.classList.remove('hidden');
-            } else {
-                notesBox.classList.add('hidden');
-            }
-
-            document.getElementById('modal-view-mistake').classList.remove('hidden');
-        }
-
-        function openQuickActionModal() {
-            document.getElementById('modal-quick-action').classList.remove('hidden');
-        }
-
-        function openExamDateModal() {
-            document.getElementById('exam-target-date-input').value = appData.examDate || '2026-12-25';
-            document.getElementById('modal-exam-date').classList.remove('hidden');
-        }
-
-        function handleSaveExamDate(e) {
-            e.preventDefault();
-            const val = document.getElementById('exam-target-date-input').value;
-            if (val) {
-                appData.examDate = val;
-                saveData();
-                closeModal('modal-exam-date');
-                showToast('מועד הבחינה עודכן בהצלחה! 🎯', 'success');
-            }
-        }
-
-        function closeModal(id) {
-            document.getElementById(id).classList.add('hidden');
-        }
-
-        // Export & Import
-        function exportData() {
-            const jsonStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(appData, null, 2));
-            const dl = document.createElement('a');
-            dl.setAttribute("href", jsonStr);
-            dl.setAttribute("download", `psychostreak_backup_${toIso()}.json`);
-            dl.click();
-            showToast('קובץ גיבוי הורד בהצלחה 💾', 'info');
-        }
-
-        function importData(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                try {
-                    const parsed = JSON.parse(e.target.result);
-                    if (parsed && typeof parsed === 'object') {
-                        appData = { ...appData, ...parsed };
-                        saveData();
-                        showToast('הנתונים שוחזרו בהצלחה! 🎉', 'success');
-                    }
-                } catch(err) {
-                    showToast('קובץ גיבוי לא תקין', 'warning');
-                }
-            };
-            reader.readAsText(file);
-        }
-
-        // =============================================================
-        // RENDER APPLICATION
-        // =============================================================
-        function renderApp() {
-            const now = new Date();
-            const { start: weekStart, end: weekEnd } = getWeekBounds(now);
-            const todayStr = toIso(now);
-
-            // 1. Week dates badge
-            const startStr = weekStart.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
-            const endStr = weekEnd.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
-            document.getElementById('week-date-badge').innerText = `שבוע א'-ש' (${startStr} - ${endStr})`;
-
-            // 2. Master Streak
-            const masterStreak = calcMasterStreak();
-            document.getElementById('sidebar-streak-num').innerText = masterStreak;
-            document.getElementById('mobile-streak-num').innerText = masterStreak;
-            document.getElementById('metric-streak').innerText = masterStreak;
-
-            // 3. Countdown
-            if (appData.examDate) {
-                const target = new Date(appData.examDate);
-                const diffDays = Math.ceil((target - now) / (1000 * 60 * 60 * 24));
-                const text = diffDays > 0 ? `עוד ${diffDays} ימים למועד!` : (diffDays === 0 ? 'הבחינה היום! 🏆' : 'המועד עבר');
-                document.getElementById('hero-countdown-text').innerText = text;
-                document.getElementById('mobile-countdown-text').innerText = diffDays > 0 ? `${diffDays} ימים` : 'מועד';
-            }
-
-            // 4. Streak 1: Essays
-            const thisWeekEssays = (appData.essays || []).filter(e => {
-                const d = new Date(e.date || e.createdAt);
-                return !isNaN(d.getTime()) && d >= weekStart && d <= weekEnd;
-            });
-            const essayCount = thisWeekEssays.length;
-            const essayStreak = calcWeeklyStreak(appData.essays, 2);
-
-            document.getElementById('metric-essays').innerText = `${essayCount} / 2`;
-            document.getElementById('metric-essays-sub').innerText = essayCount >= 2 ? 'היעד השבועי הושלם! 🎉' : 'יעד: 2 בשבוע (א\'-ש\')';
-            document.getElementById('metric-essays-sub').className = essayCount >= 2 ? 'text-[11px] font-bold text-emerald-600 mt-1' : 'text-[11px] font-bold text-stone-500 mt-1';
-            
-            document.getElementById('essay-streak-chip').innerHTML = `<span>🏆</span> ${essayStreak} ${essayStreak === 1 ? 'שבוע' : 'שבועות'} רצופים`;
-            document.getElementById('tab-essay-progress-num').innerText = `${essayCount} / 2 חיבורים ${essayCount >= 2 ? '• הושלם! 🎉' : ''}`;
-            
-            const essayBar = document.getElementById('tab-essay-progress-bar');
-            essayBar.style.width = `${Math.min(100, (essayCount / 2) * 100)}%`;
-            essayBar.className = essayCount >= 2 
-                ? 'h-full rounded-full transition-all duration-500 bg-gradient-to-r from-emerald-500 to-teal-500' 
-                : 'h-full rounded-full transition-all duration-500 bg-gradient-to-r from-pink-400 to-rose-400';
-
-            const essayListHtml = thisWeekEssays.length === 0
-                ? '<div class="p-3 bg-stone-50 rounded-2xl text-xs text-stone-400 text-center border border-dashed border-stone-200">טרם נכתב חיבור השבוע. הזמן לכתוב! 📝</div>'
-                : thisWeekEssays.map(e => `
-                    <div class="p-3 bg-pink-50/50 rounded-2xl border border-pink-100 flex items-center justify-between gap-2 text-xs">
-                        <div class="truncate flex-1">
-                            <div class="font-bold text-stone-900 truncate">${e.topic}</div>
-                            <div class="text-[10px] text-stone-500">${new Date(e.date).toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})}</div>
-                        </div>
-                        <button onclick="deleteEssay('${e.id}')" class="text-stone-400 hover:text-rose-600 p-1" title="מחיקה">✕</button>
-                    </div>
-                `).join('');
-            document.getElementById('tab-essays-list').innerHTML = essayListHtml;
-
-            // 5. Streak 2: Mental Math
-            const hasDoneMathToday = (appData.mentalMathLogs || []).some(l => l.date === todayStr);
-            const mathStreak = calcDailyStreak(appData.mentalMathLogs);
-
-            document.getElementById('metric-math-status').innerText = hasDoneMathToday ? '✅ הושלם להיום!' : '⏳ טרם בוצע';
-            document.getElementById('metric-math-status').className = hasDoneMathToday ? 'text-[11px] font-bold text-emerald-600 mt-1' : 'text-[11px] font-bold text-amber-600 mt-1';
-            
-            document.getElementById('tab-math-streak-chip').innerHTML = `<span>🔥</span> ${mathStreak} ${mathStreak === 1 ? 'יום' : 'ימים'} ברצף`;
-
-            const mathBox = document.getElementById('tab-math-status-box');
-            const mathText = document.getElementById('tab-math-status-text');
-            const mathBtn = document.getElementById('tab-math-checkin-btn');
-
-            if (hasDoneMathToday) {
-                mathBox.className = 'p-4 rounded-2xl border text-center transition-all bg-emerald-50 border-emerald-200 text-emerald-800';
-                mathText.innerText = '✅ 15 דקות הושלמו להיום! אלופה!';
-                mathBtn.disabled = true;
-                mathBtn.className = 'w-full py-4 bg-emerald-100 text-emerald-700 font-bold rounded-2xl text-sm flex items-center justify-center gap-2 cursor-default';
-                mathBtn.innerHTML = '<span>✓</span> הושלם להיום!';
-            } else {
-                mathBox.className = 'p-4 rounded-2xl border text-center transition-all bg-stone-50 border-stone-200 text-stone-700';
-                mathText.innerText = '⏳ טרם בוצע היום (יעד: 15 דק\')';
-                mathBtn.disabled = false;
-                mathBtn.className = 'w-full py-4 bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-bold rounded-2xl text-sm flex items-center justify-center gap-2 shadow-md shadow-pink-500/20 active:scale-95 transition-all';
-                mathBtn.innerHTML = '<span>⚡</span> סימנתי שביצעתי 15 דקות עכשיו!';
-            }
-
-            // 6. Streak 3: Sections
-            const thisWeekSections = (appData.sections || []).filter(s => {
-                const d = new Date(s.date || s.createdAt);
-                return !isNaN(d.getTime()) && d >= weekStart && d <= weekEnd;
-            });
-            const sectionCount = thisWeekSections.length;
-            const sectionStreak = calcWeeklyStreak(appData.sections, 4);
-
-            document.getElementById('metric-sections').innerText = `${sectionCount} / 4`;
-            document.getElementById('metric-sections-sub').innerText = sectionCount >= 4 ? 'היעד השבועי הושלם! 🎉' : 'יעד: 4 פרקים (א\'-ש\')';
-            document.getElementById('metric-sections-sub').className = sectionCount >= 4 ? 'text-[11px] font-bold text-emerald-600 mt-1' : 'text-[11px] font-bold text-stone-500 mt-1';
-
-            document.getElementById('tab-section-streak-chip').innerHTML = `<span>⚡</span> ${sectionStreak} ${sectionStreak === 1 ? 'שבוע' : 'שבועות'} רצופים`;
-            document.getElementById('tab-section-progress-num').innerText = `${sectionCount} / 4 פרקים ${sectionCount >= 4 ? '• הושלם! 🎉' : ''}`;
-
-            const sectionBar = document.getElementById('tab-section-progress-bar');
-            sectionBar.style.width = `${Math.min(100, (sectionCount / 4) * 100)}%`;
-            sectionBar.className = sectionCount >= 4
-                ? 'h-full rounded-full transition-all duration-500 bg-gradient-to-r from-emerald-500 to-teal-500'
-                : 'h-full rounded-full transition-all duration-500 bg-gradient-to-r from-pink-500 to-rose-500';
-
-            const sectionListHtml = thisWeekSections.length === 0
-                ? '<div class="p-3 bg-stone-50 rounded-2xl text-xs text-stone-400 text-center border border-dashed border-stone-200">טרם נפתרו פרקים השבוע. קדימה לתרגל! 🎯</div>'
-                : thisWeekSections.map(s => {
-                    const isQuant = s.type === 'quantitative';
-                    return `
-                        <div class="p-3 bg-pink-50/40 rounded-2xl border border-pink-100 flex items-center justify-between text-xs">
-                            <div class="flex items-center gap-2 truncate flex-1 cursor-pointer" onclick="viewMistakeDetails('${s.id}')">
-                                <span class="px-2 py-0.5 rounded-lg text-[10px] font-bold ${isQuant ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}">
-                                    ${isQuant ? 'כמותי (20)' : 'מילולי (23)'}
-                                </span>
-                                <span class="font-black text-stone-900">${s.correct}/${s.total} (${s.percentage}%)</span>
-                                ${s.mistakes > 0 ? `<span class="text-[10px] text-rose-500 font-bold">(${s.mistakes} טעויות)</span>` : ''}
-                            </div>
-                            <div class="flex items-center gap-1.5">
-                                ${s.mistakeReasons && s.mistakeReasons.length > 0 ? `
-                                    <button onclick="viewMistakeDetails('${s.id}')" class="text-[10px] text-pink-700 bg-pink-100 px-2 py-0.5 rounded-lg font-bold hover:bg-pink-200 transition-colors" title="צפייה בתחקור">
-                                        תחקור 📝
-                                    </button>
-                                ` : ''}
-                                <button onclick="deleteSection('${s.id}')" class="text-stone-400 hover:text-rose-600 p-1 rounded-lg" title="מחיקה">✕</button>
-                            </div>
-                        </div>
-                    `;
-                }).join('');
-            document.getElementById('tab-sections-list').innerHTML = sectionListHtml;
-
-            // 7. Accuracy Analytics
-            const quantSecs = (appData.sections || []).filter(s => s.type === 'quantitative');
-            const verbalSecs = (appData.sections || []).filter(s => s.type === 'verbal');
-            
-            document.getElementById('stat-quant-count').innerText = `${quantSecs.length} פרקים`;
-            document.getElementById('stat-verbal-count').innerText = `${verbalSecs.length} פרקים`;
-
-            if (quantSecs.length > 0) {
-                const qSum = quantSecs.reduce((a, c) => a + (c.correct || 0), 0);
-                const qAvg = (qSum / quantSecs.length).toFixed(1);
-                const qPct = Math.round((qSum / (quantSecs.length * 20)) * 100);
-                document.getElementById('stat-quant-avg').innerText = `${qAvg} / 20`;
-                document.getElementById('stat-quant-pct').innerText = `${qPct}% דיוק`;
-            } else {
-                document.getElementById('stat-quant-avg').innerText = '- / 20';
-                document.getElementById('stat-quant-pct').innerText = '-';
-            }
-
-            if (verbalSecs.length > 0) {
-                const vSum = verbalSecs.reduce((a, c) => a + (c.correct || 0), 0);
-                const vAvg = (vSum / verbalSecs.length).toFixed(1);
-                const vPct = Math.round((vSum / (verbalSecs.length * 23)) * 100);
-                document.getElementById('stat-verbal-avg').innerText = `${vAvg} / 23`;
-                document.getElementById('stat-verbal-pct').innerText = `${vPct}% דיוק`;
-            } else {
-                document.getElementById('stat-verbal-avg').innerText = '- / 23';
-                document.getElementById('stat-verbal-pct').innerText = '-';
-            }
-
-            // 8. Dashboard Recent Activity List
-            const recentActs = [];
-            (thisWeekEssays || []).forEach(e => recentActs.push({ text: `מטלת כתיבה: ${e.topic}`, type: 'essay', date: e.date, icon: '✍️' }));
-            (thisWeekSections || []).forEach(s => recentActs.push({ text: `${s.type === 'quantitative' ? 'פרק כמותי' : 'פרק מילולי'} - ${s.correct}/${s.total} (${s.percentage}%)`, type: 'section', date: s.date, icon: '⏱️' }));
-            if (hasDoneMathToday) recentActs.push({ text: '15 דקות חישוב מהיר היום', type: 'math', date: todayStr, icon: '🧮' });
-
-            document.getElementById('dashboard-total-acts').innerText = `${recentActs.length} פעילויות`;
-            const recentEl = document.getElementById('dashboard-recent-list');
-            if (recentActs.length === 0) {
-                recentEl.innerHTML = '<div class="p-4 bg-stone-50 rounded-2xl text-xs text-stone-400 text-center border border-dashed border-stone-200">עדיין אין פעילויות השבוע. בואי נתחיל פרק או חישוב מהיר! 🎯</div>';
-            } else {
-                recentEl.innerHTML = recentActs.map(a => `
-                    <div class="p-3 bg-pink-50/40 rounded-2xl border border-pink-100 flex items-center justify-between text-xs">
-                        <div class="flex items-center gap-2 font-bold text-stone-800">
-                            <span>${a.icon}</span>
-                            <span>${a.text}</span>
-                        </div>
-                        <span class="text-[10px] text-stone-400">${new Date(a.date).toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})}</span>
-                    </div>
-                `).join('');
-            }
-        }
-
-        // Initialize on DOM load
-        window.addEventListener('DOMContentLoaded', () => {
-            renderApp();
-            if ('serviceWorker' in navigator) {
-                navigator.serviceWorker.register('./sw.js?v=20261024_psychostreak_pink').catch(() => {});
-            }
-        });
     </script>
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Custom Styles -->
+    <!-- Instant Splash Screen Styles -->
+    <style>
+        #splash-screen {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #fafaf9;
+            background: radial-gradient(circle at 50% 38%, #e0f2fe 0%, #fafaf9 68%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 99999;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Heebo', sans-serif;
+            text-align: center;
+            padding: 24px;
+            box-sizing: border-box;
+            direction: rtl;
+        }
+        .splash-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            animation: splashFadeIn 0.35s ease-out;
+        }
+        .splash-icon-wrapper {
+            width: 104px;
+            height: 104px;
+            border-radius: 26px;
+            box-shadow: 0 16px 36px -6px rgba(186, 230, 253, 0.7), 0 4px 12px rgba(0, 0, 0, 0.04);
+            overflow: hidden;
+            background: #ffffff;
+            margin-bottom: 20px;
+            animation: splashFloat 2.6s ease-in-out infinite;
+        }
+        .splash-icon {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .splash-title {
+            font-size: 26px;
+            font-weight: 900;
+            color: #1c1917;
+            margin: 0 0 6px 0;
+            letter-spacing: -0.5px;
+        }
+        .splash-title-pro {
+            background: linear-gradient(135deg, #9333ea, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .splash-subtitle {
+            font-size: 13px;
+            font-weight: 600;
+            color: #78716c;
+            margin: 0;
+        }
+        .splash-bar {
+            width: 140px;
+            height: 5px;
+            background: #e7e5e4;
+            border-radius: 99px;
+            overflow: hidden;
+            margin-top: 28px;
+            position: relative;
+        }
+        .splash-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 40%;
+            background: linear-gradient(90deg, #9333ea, #38bdf8);
+            border-radius: 99px;
+            animation: splashShimmer 1.3s ease-in-out infinite alternate;
+        }
+        .splash-loading-text {
+            font-size: 11px;
+            color: #a8a29e;
+            font-weight: 700;
+            margin-top: 12px;
+        }
+        @keyframes splashFadeIn {
+            from { opacity: 0; transform: scale(0.96); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        @keyframes splashFloat {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-7px); }
+        }
+        @keyframes splashShimmer {
+            0% { left: -10%; width: 35%; }
+            100% { left: 75%; width: 35%; }
+        }
+    </style>
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="css/style.css?v=20261003_2">
+</head>
+<body class="bg-stone-50 text-stone-800 min-h-screen selection:bg-purple-200 selection:text-purple-900 pt-safe-top pb-safe-bottom">
+    <div id="root">
+        <!-- Instant Splash Screen (Shows in 0.05s before React & Babel load) -->
+        <div id="splash-screen">
+            <div class="splash-content">
+                <div class="splash-icon-wrapper">
+                    <img src="./icons/icon-192.png" alt="StudyStreak Pro" class="splash-icon" width="104" height="104">
+                </div>
+                <h1 class="splash-title">StudyStreak <span class="splash-title-pro">Pro</span></h1>
+                <p class="splash-subtitle">המרחב שלך להצלחה בבגרויות 📚✨</p>
+                <div class="splash-bar"></div>
+                <div class="splash-loading-text">טוען את לוח הזמנים והמשימות... ⏳</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modular Scripts -->
+    <script src="js/firebase-config.js?v=20261004_2"></script>
+    <script src="js/helpers.js?v=20261024_2"></script>
+    <script src="js/sync-helpers.js?v=20261024_2"></script>
+    <script src="js/whatsapp-service.js?v=20261010_1"></script>
+    <script src="js/file-storage.js?v=20261004_2"></script>
+    <script type="text/babel" src="js/icons.jsx?v=20261004_2"></script>
+    <script type="text/babel" src="js/app.jsx?v=20261024_2"></script>
 </body>
 </html>
