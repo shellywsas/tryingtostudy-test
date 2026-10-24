@@ -55,9 +55,31 @@
         return { ...localT, ...incomingT };
     }
 
-    function mergeTasks(localTasks, incomingTasks, pointsHistory) {
-        const local = Array.isArray(localTasks) ? localTasks : [];
-        const incoming = Array.isArray(incomingTasks) ? incomingTasks : [];
+    function mergeExams(localExams, remoteExams) {
+        const local = Array.isArray(localExams) ? localExams : [];
+        const remote = Array.isArray(remoteExams) ? remoteExams : [];
+        const byId = new Map();
+        for (const e of remote) {
+            if (e && e.id) byId.set(e.id, e);
+        }
+        for (const e of local) {
+            if (!e || !e.id) continue;
+            if (!byId.has(e.id)) {
+                byId.set(e.id, e);
+            } else {
+                const r = byId.get(e.id);
+                const localUpdated = e.updatedAt || e.lastModified || 0;
+                const remoteUpdated = r.updatedAt || r.lastModified || 0;
+                byId.set(e.id, localUpdated >= remoteUpdated ? { ...r, ...e } : { ...e, ...r });
+            }
+        }
+        return Array.from(byId.values());
+    }
+
+    function mergeTasks(localTasks, incomingTasks, pointsHistory, deletedTaskIds = []) {
+        const deletedSet = new Set(Array.isArray(deletedTaskIds) ? deletedTaskIds : []);
+        const local = (Array.isArray(localTasks) ? localTasks : []).filter(t => t && t.id && !deletedSet.has(t.id));
+        const incoming = (Array.isArray(incomingTasks) ? incomingTasks : []).filter(t => t && t.id && !deletedSet.has(t.id));
         const byId = new Map();
         for (const t of local) {
             if (t && t.id) byId.set(t.id, t);
@@ -68,10 +90,8 @@
         }
         for (const t of local) {
             if (!t || !t.id) continue;
-            if (!incoming.some((x) => x && x.id === t.id)) {
-                if (taskLooksCompleted(t, pointsHistory)) {
-                    byId.set(t.id, t);
-                }
+            if (!byId.has(t.id)) {
+                byId.set(t.id, t);
             }
         }
         return Array.from(byId.values());
@@ -123,31 +143,88 @@
         return Array.from(map.values());
     }
 
+    const OUTBOX_KEY_PREFIX = 'studyStreak_outbox_';
+
+    function markPendingSync(username, data) {
+        if (!username || typeof localStorage === 'undefined') return;
+        try {
+            const outboxItem = {
+                username,
+                timestamp: Date.now(),
+                data: data
+            };
+            localStorage.setItem(OUTBOX_KEY_PREFIX + username, JSON.stringify(outboxItem));
+        } catch (e) {
+            console.warn('Could not write to sync outbox:', e);
+        }
+    }
+
+    function getPendingSync(username) {
+        if (!username || typeof localStorage === 'undefined') return null;
+        try {
+            const raw = localStorage.getItem(OUTBOX_KEY_PREFIX + username);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function clearPendingSync(username) {
+        if (!username || typeof localStorage === 'undefined') return;
+        try {
+            localStorage.removeItem(OUTBOX_KEY_PREFIX + username);
+        } catch (e) {}
+    }
+
     function applyRemoteUser(local, remote, tabWrittenSync) {
         if (!remote) return local;
         if (!local) return remote;
         const remoteSync = remote.lastSync || 0;
         const localSync = local.lastSync || 0;
         const mergedBadges = mergeBadges(local.badges, remote.badges);
-        const mergedHighest = Math.max(
-            Number(local.highestWeeklyPoints) || 0,
-            Number(remote.highestWeeklyPoints) || 0,
-            Number(local.weeklyPoints) || 0,
-            Number(remote.weeklyPoints) || 0
-        );
+        const mergedExams = mergeExams(local.exams || [], remote.exams || []);
+        const mergedDeletedTaskIds = Array.from(new Set([
+            ...(Array.isArray(local.deletedTaskIds) ? local.deletedTaskIds : []),
+            ...(Array.isArray(remote.deletedTaskIds) ? remote.deletedTaskIds : [])
+        ]));
 
         if (tabWrittenSync && remoteSync && remoteSync <= tabWrittenSync) {
-            return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
+            return { 
+                ...local, 
+                badges: mergedBadges, 
+                exams: mergedExams,
+                deletedTaskIds: mergedDeletedTaskIds,
+                tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
+            };
         }
-        if (!remoteSync && localSync) return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
-        if (remoteSync && localSync && remoteSync < localSync) return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
-        if (remoteSync && localSync && remoteSync === localSync) return { ...local, badges: mergedBadges, highestWeeklyPoints: Math.max(Number(local.highestWeeklyPoints) || 0, mergedHighest) };
+        if (!remoteSync && localSync) return { 
+            ...local, 
+            badges: mergedBadges, 
+            exams: mergedExams,
+            deletedTaskIds: mergedDeletedTaskIds,
+            tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
+        };
+        if (remoteSync && localSync && remoteSync < localSync) return { 
+            ...local, 
+            badges: mergedBadges, 
+            exams: mergedExams,
+            deletedTaskIds: mergedDeletedTaskIds,
+            tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
+        };
+        if (remoteSync && localSync && remoteSync === localSync) return { 
+            ...local, 
+            badges: mergedBadges, 
+            exams: mergedExams,
+            deletedTaskIds: mergedDeletedTaskIds,
+            tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
+        };
         const hist = local.pointsHistory || remote.pointsHistory || [];
         return {
             ...remote,
             badges: mergedBadges,
-            highestWeeklyPoints: Math.max(Number(remote.highestWeeklyPoints) || 0, mergedHighest),
-            tasks: mergeTasks(local.tasks || [], remote.tasks || [], hist),
+            exams: mergedExams,
+            deletedTaskIds: mergedDeletedTaskIds,
+            tasks: mergeTasks(local.tasks || [], remote.tasks || [], hist, mergedDeletedTaskIds),
         };
     }
 
@@ -160,9 +237,37 @@
         let taskStreak = user.taskStreak;
         let streakHistory = [...(user.streakHistory || [])];
         let newHist = [...hist];
-        const weekStart = user.nextWeeklyReset ? (user.nextWeeklyReset - 7 * 86400000) : getLastSaturday22PM();
+        const weekStart = getLastSaturday22PM();
 
-        const tasks = user.tasks.map((t) => {
+        const deletedSet = new Set(Array.isArray(user.deletedTaskIds) ? user.deletedTaskIds : []);
+        const subMap = new Map((user.subjects || []).map(s => [s.id, s.name || '']));
+        const inputTasks = user.tasks.filter(t => {
+            if (!t || !t.id) return false;
+            if (deletedSet.has(t.id)) {
+                changed = true;
+                return false;
+            }
+            const subName = subMap.get(t.subjectId) || '';
+            const isPhysics = subName.includes('פיזיקה');
+            const isCivics = subName.includes('אזרחות');
+            const titleOrTopic = `${t.title || ''} ${t.lessonTopic || ''}`;
+            const mentionsCivics = titleOrTopic.includes('אזרחות') || titleOrTopic.includes('אופיה של מדינת ישראל') || titleOrTopic.includes('מגילת העצמאות');
+            const mentionsPhysics = titleOrTopic.includes('פיזיקה') || titleOrTopic.includes('קולון') || titleOrTopic.includes('דופלר') || titleOrTopic.includes('אנרגיה חשמלית');
+
+            if (isPhysics && mentionsCivics && !mentionsPhysics) {
+                deletedSet.add(t.id);
+                changed = true;
+                return false;
+            }
+            if (isCivics && mentionsPhysics && !mentionsCivics) {
+                deletedSet.add(t.id);
+                changed = true;
+                return false;
+            }
+            return true;
+        });
+
+        const tasks = inputTasks.map((t) => {
             if (!t) return t;
             const isDone = taskLooksCompleted(t, hist);
             const onTime = isTaskSubmittedOnTime(t);
@@ -248,58 +353,7 @@
             return updated;
         });
 
-        // Self-healing: if user has weeklyPoints > 0 but has not completed tasks or earned positive points this week, heal to 0!
-        // But NEVER zero out points if user is currently awaiting weekly reset processing (now >= nextWeeklyReset)!
-        const nowMs = Date.now();
-        const isAwaitingWeeklyReset = Boolean(user.nextWeeklyReset && nowMs >= user.nextWeeklyReset);
-        const hasPositiveActivityThisWeek = tasks.some(t => {
-            if (!t || !t.completed || !t.completedAt) return false;
-            const tTime = new Date(t.completedAt).getTime();
-            return !isNaN(tTime) && tTime >= weekStart;
-        }) || newHist.some(h => {
-            if (!h || !h.date || h.canceled || (h.points || 0) <= 0) return false;
-            const hTime = new Date(h.date).getTime();
-            return !isNaN(hTime) && hTime >= weekStart;
-        });
-
-        if (!isAwaitingWeeklyReset && !hasPositiveActivityThisWeek && weeklyPoints > 0) {
-            weeklyPoints = 0;
-            changed = true;
-        }
-
-        // Automatic update & restoration of all-time highest weekly points:
-        const maxHistorical = typeof calculateMaxHistoricalWeeklyPoints === 'function'
-            ? calculateMaxHistoricalWeeklyPoints(user)
-            : 0;
-        const currentHighest = Number(user.highestWeeklyPoints) || 0;
-        const highestWeeklyPoints = Math.max(currentHighest, weeklyPoints, maxHistorical);
-        if (highestWeeklyPoints !== currentHighest) {
-            changed = true;
-        }
-
-        // Self-healing for weekly champ crowns:
-        let badges = [...(user.badges || [])].map(normalizeBadge).filter(Boolean);
-        if (user.username === 'שליי' || user.name === 'שלי') {
-            const champBadgeIdx = badges.findIndex(b => b && b.id === 'b_weekly_champ');
-            if (champBadgeIdx !== -1) {
-                if ((badges[champBadgeIdx].count || 1) < 3) {
-                    badges[champBadgeIdx] = {
-                        ...badges[champBadgeIdx],
-                        count: 3,
-                        lastWonAt: badges[champBadgeIdx].lastWonAt || '2026-10-10T22:00:00.000Z'
-                    };
-                    changed = true;
-                }
-            } else {
-                badges.push({
-                    id: 'b_weekly_champ',
-                    count: 3,
-                    earnedAt: '2026-09-30T21:55:58.830Z',
-                    lastWonAt: '2026-10-10T22:00:00.000Z'
-                });
-                changed = true;
-            }
-        }
+        // Preserve weeklyPoints - weekly crowning and points reset are handled safely in weekly reset cycle
 
         if (!changed) return user;
 
@@ -308,11 +362,10 @@
             tasks,
             totalPoints,
             weeklyPoints,
-            highestWeeklyPoints,
-            badges,
             pointsHistory: newHist,
             taskStreak: taskStreak !== undefined ? taskStreak : (user.taskStreak || 0),
-            streakHistory
+            streakHistory,
+            deletedTaskIds: Array.from(deletedSet)
         };
     }
 
@@ -388,6 +441,7 @@
 
     const api = {
         mergeTasks,
+        mergeExams,
         applyRemoteUser,
         healCompletedFromHistory,
         restoreOnDueEdit,
@@ -397,12 +451,16 @@
         getLastSaturday22PM,
         normalizeBadge,
         mergeBadges,
+        markPendingSync,
+        getPendingSync,
+        clearPendingSync,
     };
 
     if (typeof module !== "undefined" && module.exports) {
         module.exports = api;
     }
     root.mergeTasks = mergeTasks;
+    root.mergeExams = mergeExams;
     root.applyRemoteUser = applyRemoteUser;
     root.healCompletedFromHistory = healCompletedFromHistory;
     root.restoreOnDueEdit = restoreOnDueEdit;
@@ -411,4 +469,7 @@
     root.getLastSaturday22PM = getLastSaturday22PM;
     root.normalizeBadge = normalizeBadge;
     root.mergeBadges = mergeBadges;
+    root.markPendingSync = markPendingSync;
+    root.getPendingSync = getPendingSync;
+    root.clearPendingSync = clearPendingSync;
 })(typeof globalThis !== "undefined" ? globalThis : this);

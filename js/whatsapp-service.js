@@ -119,7 +119,8 @@ const WhatsAppService = {
                     if (found) sName = found.name;
                 }
                 if (!sName) sName = h.subject || 'כללי';
-                return `  • ${h.title} (${sName})`;
+                const durStr = h.studyTimeRange ? ` [⏳ ${h.studyTimeRange}]` : '';
+                return `  • ${h.title} (${sName})${durStr}`;
             }).slice(0, 10).join('\n');
             if (completedHW.length > 10) hwDetails += `\n  • ועוד ${completedHW.length - 10} משימות נוספות!`;
         } else {
@@ -140,6 +141,15 @@ const WhatsAppService = {
                `📅 שבוע: ${start} - ${end}\n\n` +
                `📊 סיכום ההישגים השבוע:\n` +
                `  ✅ משימות ושיעורי בית שהושלמו: ${completedHW.length}\n` +
+               (() => {
+                   const h = reportData?.totalStudyHours > 0 ? reportData.totalStudyHours : 0;
+                   if (h > 0) {
+                       return `  ⏳ שעות למידה שתועדו השבוע: ${h} שעות מתועדות\n` +
+                              `     *(לתשומת לבכם: מדובר בשעות שסומנו במשימות; לא כל זמן הלמידה נמדד ונרשם בשעות)*\n`;
+                   } else {
+                       return `  ⏳ שעות למידה שתועדו השבוע: לא נרשמו שעות (שעות נרשמות כאשר בוחרים לתעד זמן במשימה)\n`;
+                   }
+               })() +
                (examPrep.length > 0 ? `  🎯 סשנים של הכנה למבחנים: ${examPrep.length}\n` : '') +
                `  ⭐ נקודות שנצברו השבוע: ${points} נק'\n` +
                `${streakLine}\n\n` +
@@ -178,6 +188,67 @@ const WhatsAppService = {
             return getRandomMotivationalMessage(subj, title, top, win, name);
         }
         return `היי ${name}! תזכורת חמה לשיעורי הבית ב-${subj}: "${title}". זמן מעולה להקדיש לזה קצת תשומת לב (${win}) 💪✨`;
+    },
+
+    /**
+     * Generates a single, polite, combined reminder digest when a student has multiple upcoming tasks.
+     * Prevents spamming multiple WhatsApp messages at once.
+     */
+    generateCombinedStudentReminderText(studentName, tasks = [], subjects = []) {
+        const name = studentName || 'שלי';
+        if (!tasks || tasks.length === 0) {
+            return `היי ${name}! 🌸 זמן מעולה ללמידה קצרה ושמירה על הרצף! 💪✨`;
+        }
+        if (tasks.length === 1) {
+            const task = tasks[0];
+            const sub = subjects.find(s => s && s.id === task.subjectId);
+            return this.generateStudentReminderText({
+                studentName: name,
+                subjectName: sub ? sub.name : 'כללי',
+                taskTitle: task.title,
+                dueDate: task.dueDate,
+                dueTime: task.dueTime,
+                freeSlotText: 'בזמן הפנוי שלך היום'
+            });
+        }
+
+        const todayStr = (() => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        })();
+        const tomorrowStr = (() => {
+            const d = new Date();
+            d.setDate(d.getDate() + 1);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        })();
+
+        // מציגים לכל היותר 3 משימות הכי דחופות כדי לא להעמיס בבת אחת!
+        const displayTasks = tasks.slice(0, 3);
+        const taskLines = displayTasks.map((t, idx) => {
+            const sub = subjects.find(s => s && s.id === t.subjectId);
+            const sName = sub ? sub.name : (t.subject || 'כללי');
+            let whenStr = '';
+            if (t.dueDate) {
+                if (t.dueDate === todayStr) whenStr = `היום${t.dueTime ? ' עד ' + t.dueTime : ''}`;
+                else if (t.dueDate === tomorrowStr) whenStr = `מחר${t.dueTime ? ' עד ' + t.dueTime : ''}`;
+                else {
+                    try {
+                        const [y, m, d] = t.dueDate.split('-');
+                        whenStr = `${d}/${m}${t.dueTime ? ' ' + t.dueTime : ''}`;
+                    } catch(e) { whenStr = t.dueDate; }
+                }
+            }
+            const timeInfo = whenStr ? ` (📅 ${whenStr})` : '';
+            return `  ${idx + 1}. ${t.title} [${sName}]${timeInfo}`;
+        }).join('\n');
+
+        const moreCount = tasks.length - displayTasks.length;
+        const moreLine = moreCount > 0 ? `\n  • (ועוד ${moreCount} משימות נוספות שממתינות לך בהמשך באפליקציה)` : '';
+
+        return `היי ${name}! 🌸 תזכורת חמה ומעודדת ללמידה מ-StudyStreak Pro ✨\n` +
+               `יש לך ${tasks.length} משימות לביצוע:\n` +
+               `${taskLines}${moreLine}\n\n` +
+               `כל התקדמות קטנה שומרת על הרצף שלך ומקרבת אותך למטרה! בהצלחה רבה 💪🍀`;
     }
 };
 

@@ -112,10 +112,17 @@ function App() {
                 setSyncState('syncing');
                 try {
                     const pending = typeof getPendingSync === 'function' ? getPendingSync(targetUser) : null;
-                    const userToUpload = pending?.data || globalState.users[targetUser];
+                    let userToUpload = pending?.data || globalState.users[targetUser];
                     if (!userToUpload) {
                         setSyncState('synced');
                         return true;
+                    }
+                    if (Array.isArray(userToUpload.deletedTaskIds) && userToUpload.deletedTaskIds.length > 0 && Array.isArray(userToUpload.tasks)) {
+                        const delSet = new Set(userToUpload.deletedTaskIds);
+                        userToUpload = {
+                            ...userToUpload,
+                            tasks: userToUpload.tasks.filter(t => t && !delSet.has(t.id))
+                        };
                     }
                     const cleanData = sanitizeForFirestore(userToUpload);
                     await db.collection("users").doc(targetUser).set(cleanData, { merge: true });
@@ -202,9 +209,6 @@ function App() {
             }, [globalState.activeUser]);
 
             const activeUserData = globalState.activeUser ? globalState.users[globalState.activeUser] : null;
-            const activeUserDataRef = useRef(activeUserData);
-            activeUserDataRef.current = activeUserData;
-            const weeklyReportSentRef = useRef('');
 
             useEffect(() => {
                 if (!activeUserData) return;
@@ -232,15 +236,6 @@ function App() {
                     const updatedUser = typeof updater === 'function' ? updater(user) : { ...user, ...updater };
                     if (updatedUser === user) return prev;
                     
-                    // סנכרון ושמירה אוטומטית ומיידית של שיא הנקודות בכל פעם שנקודות השבוע גדלות
-                    if (typeof updatedUser.weeklyPoints === 'number') {
-                        updatedUser.highestWeeklyPoints = Math.max(
-                            Number(updatedUser.highestWeeklyPoints) || 0,
-                            Number(user?.highestWeeklyPoints) || 0,
-                            Number(updatedUser.weeklyPoints) || 0
-                        );
-                    }
-
                     updatedUser.lastSync = Date.now();
                     pendingWriteSync.current = updatedUser.lastSync;
                     
@@ -290,10 +285,6 @@ function App() {
 
             const checkAndAwardBadges = (userData) => {
                 if(!userData) return userData;
-                userData.highestWeeklyPoints = Math.max(
-                    Number(userData.highestWeeklyPoints) || 0,
-                    Number(userData.weeklyPoints) || 0
-                );
                 let newBadges = [...(userData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : b));
                 let earnedNew = false;
                 
@@ -433,104 +424,183 @@ function App() {
             ]);
 
 
+            // Helper: calculate total positive points earned by a user within a time window [startTime, endTime]
+            const calculatePointsInWindow = (uData, startTime, endTime) => {
+                if (!uData) return 0;
+                const hist = uData.pointsHistory || [];
+                const histSum = hist.filter(h => {
+                    if (!h || !h.date || h.canceled || (h.points || 0) <= 0) return false;
+                    const t = new Date(h.date).getTime();
+                    return !isNaN(t) && t >= startTime && t <= endTime;
+                }).reduce((sum, h) => sum + (h.points || 0), 0);
+
+                const tasks = uData.tasks || [];
+                const taskSum = tasks.filter(t => {
+                    if (!t || !t.completed || !t.completedAt || t.givenUp) return false;
+                    const tTime = new Date(t.completedAt).getTime();
+                    return !isNaN(tTime) && tTime >= startTime && tTime <= endTime;
+                }).reduce((sum, t) => sum + (t.pointsEarned || 1), 0);
+
+                return Math.max(histSum, taskSum);
+            };
+
+            // Helper: evaluate historical weekly wins across all past completed weeks
+            const evaluateHistoricalWeeklyWins = (userData, friendsMap) => {
+                if (!userData) return 0;
+                const now = Date.now();
+                const tasks = userData.tasks || [];
+                const hist = userData.pointsHistory || [];
+                const allTimestamps = [
+                    ...tasks.map(t => t.completedAt ? new Date(t.completedAt).getTime() : 0),
+                    ...hist.map(h => h.date ? new Date(h.date).getTime() : 0)
+                ].filter(t => t > 0 && !isNaN(t));
+
+                if (allTimestamps.length === 0) return 0;
+                const earliestTime = Math.min(...allTimestamps);
+                const friendsArr = Object.values(friendsMap || {});
+
+                let winsCount = 0;
+                let satTime = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : now;
+                const oneWeekMs = 7 * 86400000;
+                let currentWeekEnd = satTime;
+
+                while (currentWeekEnd >= earliestTime) {
+                    const currentWeekStart = currentWeekEnd - oneWeekMs;
+                    const userPtsInWeek = calculatePointsInWindow(userData, currentWeekStart, currentWeekEnd);
+
+                    if (userPtsInWeek > 0) {
+                        let isTopInWeek = true;
+                        for (const f of friendsArr) {
+                            const fPtsInWeek = calculatePointsInWindow(f, currentWeekStart, currentWeekEnd);
+                            if (fPtsInWeek > userPtsInWeek) {
+                                isTopInWeek = false;
+                                break;
+                            }
+                        }
+                        if (isTopInWeek) {
+                            winsCount++;
+                        }
+                    }
+                    currentWeekEnd -= oneWeekMs;
+                }
+
+                return winsCount;
+            };
+
             useEffect(() => {
                 if (!activeUserData || !globalState.activeUser) return;
+                const now = new Date().getTime();
+                const currentWeekStart = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
+                
+                // 1. Regular weekly reset on Saturday 22:00 (or on first load after Saturday 22:00)
+                if (now > (activeUserData.nextWeeklyReset || 0)) {
+                    const completedWeekEnd = activeUserData.nextWeeklyReset && activeUserData.nextWeeklyReset > 0 
+                        ? activeUserData.nextWeeklyReset 
+                        : currentWeekStart;
+                    const completedWeekStart = completedWeekEnd - (7 * 86400000);
 
-                const checkWeeklyReset = () => {
-                    const currentUser = activeUserDataRef.current || activeUserData;
-                    if (!currentUser || !globalState.activeUser) return;
+                    const userHistoricalPts = calculatePointsInWindow(activeUserData, completedWeekStart, completedWeekEnd);
+                    const userWeeklyPts = Math.max(activeUserData.weeklyPoints || 0, activeUserData.lastWeekPoints || 0, userHistoricalPts);
 
-                    const now = Date.now();
-                    const resetTime = currentUser.nextWeeklyReset || getNextSaturday22PM();
+                    const friendsArr = Object.values(liveFriends || {});
+                    let isTop = userWeeklyPts > 0;
+                    let topFriendName = '';
+                    let topFriendPts = 0;
 
-                    // If nextWeeklyReset was never set, initialize it
-                    if (!currentUser.nextWeeklyReset) {
-                        updateUserData({ nextWeeklyReset: getNextSaturday22PM() });
-                        return;
-                    }
-
-                    // נעילה ובדיקה שבועית במוצאי שבת ב-22:00
-                    if (now >= resetTime) {
-                        const weekWindowEnd = resetTime;
-                        const weekWindowStart = weekWindowEnd - (7 * 86400000);
-
-                        // חישוב מדויק של נקודות המשתמשת מהשבוע שהסתיים:
-                        // לוקחים את המקסימום בין הערך הקיים לבין חישוב מדויק מהמשימות וההיסטוריה
-                        const ptsFromActivity = typeof calculateWeeklyPointsFromActivity === 'function'
-                            ? calculateWeeklyPointsFromActivity(currentUser, weekWindowStart, weekWindowEnd)
-                            : 0;
-                        const userWeeklyPts = Math.max(currentUser.weeklyPoints || 0, ptsFromActivity);
-
-                        // איסוף כל החברות והשוואת הנקודות בצורה מלאה ומדויקת
-                        const friendsMap = new Map();
-                        (currentUser.friends || []).forEach(f => {
-                            if (f && f.username && f.username !== globalState.activeUser) {
-                                friendsMap.set(f.username, f);
+                    friendsArr.forEach(f => {
+                        const fHistPts = calculatePointsInWindow(f, completedWeekStart, completedWeekEnd);
+                        const fPts = Math.max(f.weeklyPoints || 0, f.lastWeekPoints || 0, fHistPts);
+                        if (fPts > userWeeklyPts) {
+                            isTop = false;
+                            if (fPts > topFriendPts) {
+                                topFriendPts = fPts;
+                                topFriendName = f.name || f.username;
                             }
-                        });
-                        Object.values(liveFriends || {}).forEach(f => {
-                            if (f && f.username && f.username !== globalState.activeUser) {
-                                friendsMap.set(f.username, { ...(friendsMap.get(f.username) || {}), ...f });
-                            }
-                        });
-
-                        let isTop = true;
-                        let topFriendName = '';
-                        let topFriendPts = 0;
-
-                        friendsMap.forEach(f => {
-                            // משווים מול הניקוד של השבוע שהסתיים (אם החברה כבר התאפסה - מול lastWeekPoints, אחרת מול weeklyPoints)
-                            const fPts = Math.max(f.weeklyPoints || 0, f.lastWeekPoints || 0);
-                            if (fPts > userWeeklyPts) {
-                                isTop = false;
-                                if (fPts > topFriendPts) {
-                                    topFriendPts = fPts;
-                                    topFriendName = f.name || f.username;
-                                }
-                            }
-                        });
-
-                        let updatedBadges = [...(currentUser.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : b));
-                        let wonCrown = false;
-
-                        if (isTop && userWeeklyPts > 0) {
-                            wonCrown = true;
-                            const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
-                            if (champBadgeIdx !== -1) {
-                                updatedBadges[champBadgeIdx] = {
-                                    ...updatedBadges[champBadgeIdx],
-                                    count: (updatedBadges[champBadgeIdx].count || 1) + 1,
-                                    lastWonAt: new Date().toISOString()
-                                };
-                            } else {
-                                updatedBadges.push({
-                                    id: 'b_weekly_champ',
-                                    count: 1,
-                                    earnedAt: new Date().toISOString(),
-                                    lastWonAt: new Date().toISOString()
-                                });
-                            }
-                            showToast(`👑 מזל טוב! הוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! זכית בתג אלופת השבוע! 👑`, 'success');
-                        } else if (topFriendName && topFriendPts > 0) {
-                            showToast(`סיום שבוע! אלופת השבוע החולף היא ${topFriendName} עם ${topFriendPts} נק' 👑`, 'info');
                         }
+                    });
 
-                        const nextSaturday = getNextSaturday22PM();
-                        updateUserData(prev => ({
-                            ...prev,
-                            highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, userWeeklyPts),
-                            lastWeekPoints: userWeeklyPts,
-                            weeklyPoints: 0,
-                            nextWeeklyReset: nextSaturday,
-                            badges: wonCrown ? updatedBadges : (prev.badges || [])
-                        }));
+                    let updatedBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : { ...b }));
+                    let wonCrown = false;
+                    let newChampCount = 1;
+
+                    if (isTop && userWeeklyPts > 0) {
+                        wonCrown = true;
+                        const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
+                        if (champBadgeIdx !== -1) {
+                            newChampCount = (updatedBadges[champBadgeIdx].count || 1) + 1;
+                            updatedBadges[champBadgeIdx] = {
+                                ...updatedBadges[champBadgeIdx],
+                                count: newChampCount,
+                                lastWonAt: new Date().toISOString()
+                            };
+                        } else {
+                            newChampCount = 1;
+                            updatedBadges.push({
+                                id: 'b_weekly_champ',
+                                count: 1,
+                                earnedAt: new Date().toISOString()
+                            });
+                        }
+                        showToast(`👑 מזל טוב! הוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! זכית בכתר שבועי נוסף! 👑`, 'success');
+                        setCrowningCelebrationModal({
+                            winnerName: activeUserData.name || 'אלופה',
+                            points: userWeeklyPts,
+                            crownCount: newChampCount,
+                            isNewWin: true
+                        });
+                    } else if (topFriendName && topFriendPts > 0) {
+                        showToast(`סיום שבוע! אלופת השבוע החולף היא ${topFriendName} עם ${topFriendPts} נק' 👑`, 'info');
                     }
-                };
 
-                checkWeeklyReset();
-                const intervalId = setInterval(checkWeeklyReset, 30 * 1000);
-                return () => clearInterval(intervalId);
-            }, [globalState.activeUser, activeUserData?.nextWeeklyReset]);
+                    // Calculate points earned *after* the reset timestamp for the new week
+                    const newWeekPoints = calculatePointsInWindow(activeUserData, completedWeekEnd, now);
+
+                    updateUserData(prev => ({
+                        ...prev,
+                        highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, userWeeklyPts),
+                        lastWeekPoints: userWeeklyPts,
+                        weeklyPoints: newWeekPoints,
+                        nextWeeklyReset: getNextSaturday22PM(),
+                        badges: wonCrown ? updatedBadges : (prev.badges || [])
+                    }));
+                    return;
+                }
+
+                // 2. Retroactive healing of missing crowns:
+                // If user had weeks where they were weekly champion in the past, ensure crown count reflects all won weeks!
+                const totalPastWins = evaluateHistoricalWeeklyWins(activeUserData, liveFriends);
+                const currentBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : { ...b }));
+                const champBadgeIdx = currentBadges.findIndex(b => b.id === 'b_weekly_champ');
+                const currentChampCount = champBadgeIdx !== -1 ? (currentBadges[champBadgeIdx].count || 1) : 0;
+
+                if (totalPastWins > currentChampCount) {
+                    let healedBadges = [...currentBadges];
+                    if (champBadgeIdx !== -1) {
+                        healedBadges[champBadgeIdx] = {
+                            ...healedBadges[champBadgeIdx],
+                            count: totalPastWins,
+                            lastWonAt: new Date().toISOString()
+                        };
+                    } else {
+                        healedBadges.push({
+                            id: 'b_weekly_champ',
+                            count: totalPastWins,
+                            earnedAt: new Date().toISOString()
+                        });
+                    }
+                    updateUserData(prev => ({
+                        ...prev,
+                        badges: healedBadges
+                    }));
+                    showToast(`👑 עודכנו הכתרים שלך! יש לך כעת ${totalPastWins} כתרים של אלופת השבוע! 👑`, 'success');
+                    setCrowningCelebrationModal({
+                        winnerName: activeUserData.name || 'אלופה',
+                        points: activeUserData.highestWeeklyPoints || activeUserData.weeklyPoints || 0,
+                        crownCount: totalPastWins,
+                        isNewWin: false
+                    });
+                }
+            }, [globalState.activeUser, activeUserData?.nextWeeklyReset, activeUserData?.weeklyPoints, Object.keys(liveFriends || {}).length]);
 
 
             useEffect(() => {
@@ -968,6 +1038,11 @@ function App() {
                     }));
                 }
 
+                updateUserData(prev => ({
+                    ...prev,
+                    tasks: (prev.tasks || []).map(t => t.id === task.id ? { ...t, whatsappRemindersEnabled: true } : t)
+                }));
+
                 // בדיקת שעות בית ספר: אם התלמידה בבית ספר כרגע, לא שולחים הודעה שתפריע בשיעור!
                 const now = new Date();
                 const todayDay = now.getDay();
@@ -989,17 +1064,6 @@ function App() {
                         schoolNoticeTime = `${String(startH).padStart(2, '0')}:${String(startM).padStart(2, '0')}`;
                     }
                 }
-
-                const nowTs = Date.now();
-                if (!isInSchoolNow && activeUserDataRef.current) {
-                    activeUserDataRef.current.lastGlobalWhatsAppReminderSent = nowTs;
-                }
-
-                updateUserData(prev => ({
-                    ...prev,
-                    lastGlobalWhatsAppReminderSent: isInSchoolNow ? (prev.lastGlobalWhatsAppReminderSent || 0) : nowTs,
-                    tasks: (prev.tasks || []).map(t => t.id === task.id ? { ...t, whatsappRemindersEnabled: true } : t)
-                }));
 
                 if (isInSchoolNow) {
                     showToast(`תזכורות וואטסאפ הופעלו! 📚 כי את בבית ספר כעת, התזכורת הראשונה תישלח לקראת סיום הלימודים (ב-${schoolNoticeTime}).`, 'success');
@@ -1080,28 +1144,12 @@ function App() {
             };
 
             const handleSendParentWeeklyReportWhatsApp = (silent = false) => {
-                const currentUser = activeUserDataRef.current || activeUserData;
-                const currentWeek = getWeekIdentifier();
+                const p1 = activeUserData?.parentPhoneNumber?.trim();
+                const p2 = activeUserData?.parentPhoneNumber2?.trim();
 
-                // מניעת שליחה כפולה אם הדוח כבר נשלח השבוע
-                if (silent && (currentUser?.lastWeeklyReportSentWeek === currentWeek || weeklyReportSentRef.current === currentWeek)) {
-                    console.log('Weekly parent report already sent for week:', currentWeek);
-                    return;
-                }
-
-                // נעילה מיידית של שבוע השליחה למניעת כל הרצה כפולה
-                weeklyReportSentRef.current = currentWeek;
-                if (currentUser) currentUser.lastWeeklyReportSentWeek = currentWeek;
-
-                const p1 = currentUser?.parentPhoneNumber?.trim();
-                const p2 = currentUser?.parentPhoneNumber2?.trim();
-
-                // שליחת הודעה אחת בלבד להורה (עדיפות למספר הראשי, או למספר השני אם הראשי ריק)
-                const targetPhone = p1 || p2;
-
-                if (!targetPhone) {
+                if (!p1 && !p2) {
                     if (!silent) {
-                        showToast('נא להזין תחילה מספר הורה בהגדרות ⚙️', 'warning');
+                        showToast('נא להזין תחילה לפחות מספר הורה אחד בהגדרות ⚙️', 'warning');
                         setActiveTab('settings');
                     }
                     return;
@@ -1113,104 +1161,149 @@ function App() {
                     return;
                 }
 
-                const messageText = WhatsAppService.generateParentReportText(currentUser.name || 'שלי', reportData);
+                const messageText = WhatsAppService.generateParentReportText(activeUserData.name || 'שלי', reportData);
+                const recipients = [p1, p2].filter(Boolean);
 
-                // שליחת הודעה אחת בלבד
-                WhatsAppService.sendMessage({
-                    to: targetPhone,
-                    message: messageText,
-                    gatewayConfig: currentUser.whatsappGateway
-                }).catch(err => console.error('Error sending parent report to:', targetPhone, err));
+                recipients.forEach(phone => {
+                    WhatsAppService.sendMessage({
+                        to: phone,
+                        message: messageText,
+                        gatewayConfig: activeUserData.whatsappGateway
+                    }).catch(err => console.error('Error sending parent report to:', phone, err));
+                });
 
+                const currentWeek = getWeekIdentifier();
                 updateUserData(prev => ({
                     ...prev,
                     lastWeeklyReportSentWeek: currentWeek
                 }));
 
                 if (!silent) {
-                    if (currentUser?.whatsappGateway?.instanceId) {
-                        showToast(`דוח שבועי נשלח אוטומטית לוואטסאפ של ההורים! 📨🚀`, 'success');
+                    if (activeUserData?.whatsappGateway?.instanceId) {
+                        showToast(`דוח שבועי נשלח אוטומטית לוואטסאפ של ${recipients.length > 1 ? 'שני ההורים' : 'ההורים'}! 📨🚀`, 'success');
                     } else {
                         showToast(`נפתח וואטסאפ לשליחת הדוח השבועי להורים 📲`, 'info');
                     }
                 }
             };
 
+            const handleSendWhatsAppStudyReminder = (manual = false) => {
+                if (!activeUserData?.phoneNumber) {
+                    if (manual) showToast('נא להזין תחילה מספר טלפון בהגדרות 📱', 'warning');
+                    return;
+                }
+
+                const now = new Date();
+                const nowTime = now.getTime();
+
+                // סינון משימות פתוחות: כל המשימות שאינן הושלמו/בוטלו, ושלא בוטלו מפורשות בוואטסאפ
+                const activeTasks = (activeUserData.tasks || [])
+                    .filter(t => !t.completed && !t.givenUp && !t.isLessonLog && t.whatsappRemindersEnabled !== false && t.dueDate)
+                    .sort((a, b) => {
+                        const timeA = `${a.dueDate}T${a.dueTime || '23:59'}`;
+                        const timeB = `${b.dueDate}T${b.dueTime || '23:59'}`;
+                        return new Date(timeA) - new Date(timeB);
+                    });
+
+                if (activeTasks.length === 0) {
+                    if (manual) showToast('אין משימות פתוחות הממתינות לתזכורת כרגע! 🎉', 'info');
+                    return;
+                }
+
+                // סינון דחיפות חכם: משימות שעברו את היעד, משימות להיום, מחר או ב-48 השעות הקרובות בלבד ("לא כל המשימות בבת אחת!")
+                const urgentTasks = activeTasks.filter(t => {
+                    const timeStr = `${t.dueDate}T${t.dueTime || '23:59'}`;
+                    const taskDate = new Date(timeStr);
+                    if (isNaN(taskDate.getTime())) return false;
+                    const diffHours = (taskDate.getTime() - nowTime) / (1000 * 60 * 60);
+                    return diffHours <= 48; // עבר הזמן או עד 48 שעות קדימה
+                });
+
+                // בוחרים לכל היותר 1 עד 3 משימות הכי דחופות בלבד
+                const selectedTasks = urgentTasks.length > 0 
+                    ? urgentTasks.slice(0, 3) 
+                    : activeTasks.slice(0, 1);
+
+                if (selectedTasks.length === 0) {
+                    if (manual) showToast('אין משימות קרובות הדורשות תזכורת כרגע.', 'info');
+                    return;
+                }
+
+                const reminderMsg = WhatsAppService.generateCombinedStudentReminderText(
+                    activeUserData.name || 'שלי',
+                    selectedTasks,
+                    activeUserData.subjects || []
+                );
+
+                WhatsAppService.sendMessage({
+                    to: activeUserData.phoneNumber,
+                    message: reminderMsg,
+                    gatewayConfig: activeUserData.whatsappGateway
+                }).then(res => {
+                    updateUserData(prev => ({
+                        ...prev,
+                        lastGlobalWhatsAppReminderSent: Date.now()
+                    }));
+                    if (manual) {
+                        if (res && res.status === 'sent_gateway') {
+                            showToast(`תזכורת ל-${selectedTasks.length} משימות קרובות נשלחה לוואטסאפ! 💬🚀`, 'success');
+                        } else {
+                            showToast(`נפתח וואטסאפ לשליחת תזכורת למידה 📲`, 'info');
+                        }
+                    }
+                }).catch(e => {
+                    console.error('WhatsApp study reminder error:', e);
+                    if (manual) showToast('שגיאה בשליחת תזכורת לוואטסאפ', 'error');
+                });
+            };
+
             // אוטומציה של וואטסאפ: שליחת דוח שבועי במוצאי שבת ותזכורות משימות מתוזמנות
             useEffect(() => {
-                const runWhatsAppAutomationCheck = () => {
-                    const currentData = activeUserDataRef.current;
-                    if (!currentData || !currentData.whatsappGateway?.instanceId) return;
+                if (!activeUserData || !activeUserData.whatsappGateway?.instanceId) return;
 
+                const runWhatsAppAutomationCheck = () => {
                     const now = new Date();
                     const day = now.getDay(); // 6 = Saturday, 0 = Sunday
                     const hour = now.getHours();
                     const currentWeek = getWeekIdentifier(now);
 
-                    // 1. שליחת דוח הורים במוצאי שבת (החל מ-19:00) או בראשון בבוקר - הודעה אחת בלבד
+                    // 1. שליחת דוח הורים במוצאי שבת (החל מ-19:00) או בראשון בבוקר
                     const isSaturdayEveningOrSunday = (day === 6 && hour >= 19) || (day === 0 && hour < 14);
-                    const alreadySentThisWeek = currentData.lastWeeklyReportSentWeek === currentWeek || weeklyReportSentRef.current === currentWeek;
-                    const autoSendEnabled = currentData.autoSendParentReport !== false;
+                    const alreadySentThisWeek = activeUserData.lastWeeklyReportSentWeek === currentWeek;
+                    const autoSendEnabled = activeUserData.autoSendParentReport !== false;
 
                     if (isSaturdayEveningOrSunday && !alreadySentThisWeek && autoSendEnabled) {
-                        const hasParent = currentData.parentPhoneNumber || currentData.parentPhoneNumber2;
+                        const hasParent = activeUserData.parentPhoneNumber || activeUserData.parentPhoneNumber2;
                         if (hasParent) {
                             console.log('Sending automatic Saturday evening parent report via WhatsApp...');
-                            weeklyReportSentRef.current = currentWeek;
-                            currentData.lastWeeklyReportSentWeek = currentWeek;
                             handleSendParentWeeklyReportWhatsApp(true);
                         }
                     }
 
-                    // 2. תזכורות משימות חכמות (רק עבור משימות שהופעלו עליהן תזכורות וואטסאפ)
-                    if (currentData.phoneNumber) {
-                        // חישוב חלון זמנים מותר: אם יש בית ספר היום - רק מחצי שעה לפני סיום הלימודים ועד 22:00
-                        const todayPlan = (currentData.scheduleSettings || []).find(s => s.day === day);
+                    // 2. תזכורות משימות חכמות (לפי דחיפות הלו"ז - "לא כל המשימות בבת אחת!")
+                    if (activeUserData.phoneNumber) {
+                        const todayPlan = (activeUserData.scheduleSettings || []).find(s => s.day === day);
                         const schoolEndTime = todayPlan?.schoolEndTime;
                         const currentMinutes = hour * 60 + now.getMinutes();
 
                         let canSendRemindersNow = false;
-                        if (schoolEndTime) {
+                        if (schoolEndTime && schoolEndTime.trim() !== '') {
                             const [endH, endM] = schoolEndTime.split(':').map(Number);
                             const schoolEndMinutes = endH * 60 + (endM || 0);
                             const reminderStartMinutes = Math.max(0, schoolEndMinutes - 30); // חצי שעה לפני סיום הלימודים
                             canSendRemindersNow = (currentMinutes >= reminderStartMinutes && currentMinutes <= 22 * 60);
                         } else {
-                            // יום חופשי / ללא בית ספר: מ-10:00 בבוקר עד 22:00
+                            // יום חופשי / שבת: מ-10:00 בבוקר עד 22:00
                             canSendRemindersNow = (hour >= 10 && hour <= 22);
                         }
 
                         if (canSendRemindersNow) {
-                            const lastGlobalSent = currentData.lastGlobalWhatsAppReminderSent || 0;
+                            const lastGlobalSent = activeUserData.lastGlobalWhatsAppReminderSent || 0;
                             const hoursSinceGlobal = (Date.now() - lastGlobalSent) / (1000 * 60 * 60);
 
                             // מרווח גלובלי של 3.5 שעות לפחות בין תזכורות כדי למנוע ספאם!
                             if (hoursSinceGlobal >= 3.5) {
-                                const activeTasks = (currentData.tasks || []).filter(t => !t.completed && t.whatsappRemindersEnabled && t.dueDate);
-                                if (activeTasks.length > 0) {
-                                    const nowTs = Date.now();
-                                    currentData.lastGlobalWhatsAppReminderSent = nowTs;
-
-                                    // מייצרים הודעה אחת מרוכזת ומעודנת במקום להציף בהודעות נפרדות
-                                    const reminderMsg = WhatsAppService.generateCombinedStudentReminderText(
-                                        currentData.name || 'שלי',
-                                        activeTasks,
-                                        currentData.subjects || []
-                                    );
-
-                                    WhatsAppService.sendMessage({
-                                        to: currentData.phoneNumber,
-                                        message: reminderMsg,
-                                        gatewayConfig: currentData.whatsappGateway
-                                    }).then(res => {
-                                        if (res && res.status === 'sent_gateway') {
-                                            updateUserData(prev => ({
-                                                ...prev,
-                                                lastGlobalWhatsAppReminderSent: nowTs
-                                            }));
-                                        }
-                                    }).catch(e => console.error('Automated WhatsApp reminder error:', e));
-                                }
+                                handleSendWhatsAppStudyReminder(false);
                             }
                         }
                     }
@@ -1219,7 +1312,7 @@ function App() {
                 runWhatsAppAutomationCheck();
                 const intervalId = setInterval(runWhatsAppAutomationCheck, 10 * 60 * 1000);
                 return () => clearInterval(intervalId);
-            }, []);
+            }, [activeUserData?.whatsappGateway?.instanceId, activeUserData?.lastWeeklyReportSentWeek, activeUserData?.tasks, activeUserData?.scheduleSettings]);
 
             const [liveFriends, setLiveFriends] = useState({});
             
@@ -1268,6 +1361,11 @@ function App() {
 
 
             const [activeTab, setActiveTab] = useState('dashboard');
+            const [studyMode, setStudyMode] = useState(() => {
+                try {
+                    return localStorage.getItem('studyStreak_mode') || 'psychometry';
+                } catch(e) { return 'psychometry'; }
+            });
             const [toastMessage, setToastMessage] = useState(null);
             const [printMode, setPrintMode] = useState(false);
             const [printType, setPrintType] = useState(null);
@@ -1310,8 +1408,14 @@ function App() {
                 examId: '',
                 customExamName: '',
                 customSubjectId: '',
-                title: ''
+                title: '',
+                notes: ''
             });
+            const [viewingNotesTask, setViewingNotesTask] = useState(null);
+            const [viewingNotesExam, setViewingNotesExam] = useState(null);
+            const [isEditingNotesModal, setIsEditingNotesModal] = useState(false);
+            const [notesModalDraft, setNotesModalDraft] = useState('');
+            const [crowningCelebrationModal, setCrowningCelebrationModal] = useState(null);
 
             useEffect(() => {
                 if (editingTask) {
@@ -1377,6 +1481,42 @@ function App() {
 
             const handleQuickAddAttachmentToTask = (task, file, category) => {
                 return handleQuickAddAttachmentsToTask(task, file ? [file] : [], category);
+            };
+
+            const handleOpenNotesTask = (task) => {
+                if (!task) return;
+                setViewingNotesTask(task);
+                setNotesModalDraft(task.notes || '');
+                setIsEditingNotesModal(!task.notes);
+            };
+
+            const handleSaveTaskNotes = (taskId, newNotes) => {
+                const trimmed = (newNotes || '').trim();
+                updateUserData(prev => ({
+                    ...prev,
+                    tasks: (prev.tasks || []).map(t => t.id === taskId ? { ...t, notes: trimmed } : t)
+                }));
+                setViewingNotesTask(prev => prev && prev.id === taskId ? { ...prev, notes: trimmed } : prev);
+                setIsEditingNotesModal(false);
+                showToast('התכנון וההערות נשמרו בהצלחה! ✨', 'success');
+            };
+
+            const handleOpenNotesExam = (exam) => {
+                if (!exam) return;
+                setViewingNotesExam(exam);
+                setNotesModalDraft(exam.notes || '');
+                setIsEditingNotesModal(!exam.notes);
+            };
+
+            const handleSaveExamNotes = (examId, newNotes) => {
+                const trimmed = (newNotes || '').trim();
+                updateUserData(prev => ({
+                    ...prev,
+                    exams: (prev.exams || []).map(e => e.id === examId ? { ...e, notes: trimmed, updatedAt: Date.now() } : e)
+                }));
+                setViewingNotesExam(prev => prev && prev.id === examId ? { ...prev, notes: trimmed } : prev);
+                setIsEditingNotesModal(false);
+                showToast('חומר המבחן עודכן בהצלחה! ✨', 'success');
             };
 
             const openAttachmentViewer = async (task, initialIndex = 0, filterCategory = null) => {
@@ -1474,7 +1614,7 @@ function App() {
             }, [activeUserData?.tasks, taskFormSubject]);
             
             const [examPlannerData, setExamPlannerData] = useState({ 
-                step: 1, subjectId: '', examName: '', date: '', time: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '' 
+                step: 1, subjectId: '', examName: '', date: '', time: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '', notes: '' 
             });
 
 
@@ -1666,26 +1806,82 @@ function App() {
             const adminCancelPenalty = (user, penaltyLog) => {
                 if (!user || !penaltyLog) return;
                 const deducted = Math.abs(penaltyLog.points || 0);
-                // החזר כפול (פי 2): החזרת הנקודות שקוזזו בקנס + הענקת נקודות ההגשה שהיו מגיעות
-                const refund = deducted * 2;
+                const targetTask = (user.tasks || []).find(t => t.id === penaltyLog.taskId);
+                const expectedPoints = typeof calculateTaskExpectedPoints === 'function'
+                    ? calculateTaskExpectedPoints(targetTask)
+                    : (targetTask?.isExamPrep ? 2 : 1);
+                
+                const refund = deducted + expectedPoints;
+                
+                const logTime = penaltyLog.date ? new Date(penaltyLog.date).getTime() : Date.now();
+                const weekStart = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM() : 0;
+                const isThisWeek = logTime >= weekStart;
+
                 const newTotal = (user.totalPoints || 0) + refund;
-                const newWeekly = (user.weeklyPoints || 0) + refund;
+                const newWeekly = (user.weeklyPoints || 0) + (isThisWeek ? refund : 0);
+
                 const refundEntry = {
                     id: 'ph_admin_refund_' + Date.now(),
                     taskId: penaltyLog.taskId || '',
-                    taskTitle: penaltyLog.taskTitle || 'ביטול קנס והחזר כפול',
+                    taskTitle: targetTask?.title || penaltyLog.taskTitle || 'ביטול קנס',
                     points: refund,
                     date: new Date().toISOString(),
-                    details: `ביטול קנס (${deducted} נק') והחזרת נקודות הגשה שהיו מגיעות (${deducted} נק') - סה"כ פי 2 (+${refund} נק')`
+                    details: `ביטול קנס (+${deducted} נק') והענקת נקודות הגשה (+${expectedPoints} נק') - סה"כ +${refund} נק'`
                 };
+
                 const newHistory = (user.pointsHistory || []).map(h => h.id === penaltyLog.id ? { ...h, canceled: true } : h);
                 newHistory.unshift(refundEntry);
+
+                let newTasks = user.tasks || [];
+                if (targetTask) {
+                    newTasks = newTasks.map(t => {
+                        if (t.id === targetTask.id) {
+                            return {
+                                ...t,
+                                completed: true,
+                                completedAt: t.completedAt || new Date().toISOString(),
+                                autoPenaltyApplied: false,
+                                pointsEarned: expectedPoints,
+                                lateReason: ''
+                            };
+                        }
+                        return t;
+                    });
+                }
+
+                // Preserve and restore streak:
+                let newTaskStreak = user.taskStreak !== undefined ? user.taskStreak : 0;
+                let newLongestStreak = user.longestStreak || 0;
+                let newStreakHistory = [...(user.streakHistory || [])];
+
+                const brokenIdx = newStreakHistory.findIndex(s => 
+                    s && (s.brokenByTaskId === penaltyLog.taskId || 
+                          (targetTask && targetTask.dueDate && s.endDate && Math.abs(new Date(s.endDate).getTime() - new Date(targetTask.dueDate).getTime()) < 86400000))
+                );
+
+                if (brokenIdx !== -1) {
+                    const brokenRecord = newStreakHistory[brokenIdx];
+                    newStreakHistory.splice(brokenIdx, 1);
+                    if (newTaskStreak === 0) {
+                        newTaskStreak = (brokenRecord.length || 0) + 1;
+                    } else {
+                        newTaskStreak = Math.max(newTaskStreak, (brokenRecord.length || 0) + 1);
+                    }
+                } else if (targetTask && newTaskStreak === 0 && (targetTask.completed || targetTask.completedAt)) {
+                    newTaskStreak = 1;
+                }
+                newLongestStreak = Math.max(newLongestStreak, newTaskStreak);
+
                 saveAdminUserUpdate(user.username, {
                     totalPoints: newTotal,
                     weeklyPoints: newWeekly,
-                    pointsHistory: newHistory
+                    pointsHistory: newHistory,
+                    tasks: newTasks,
+                    taskStreak: newTaskStreak,
+                    longestStreak: newLongestStreak,
+                    streakHistory: newStreakHistory
                 });
-                showToast(`הקנס בוטל והוחזרו פי 2 נקודות (+${refund} נקודות) לחשבון! 💚`, 'success');
+                showToast(`הקנס בוטל והוענקו נקודות הגשה (+${refund} נק' סה"כ) לחשבון! 💚`, 'success');
             };
 
             const adminRestoreStreak = (user, streakItem) => {
@@ -1723,7 +1919,8 @@ function App() {
 
             const adminDeleteTask = (user, taskId) => {
                 const newTasks = (user.tasks || []).filter(t => t.id !== taskId);
-                saveAdminUserUpdate(user.username, { tasks: newTasks });
+                const deletedTaskIds = Array.from(new Set([...(user.deletedTaskIds || []), taskId]));
+                saveAdminUserUpdate(user.username, { tasks: newTasks, deletedTaskIds });
                 showToast('המשימה נמחקה בהצלחה', 'info');
             };
 
@@ -1745,38 +1942,84 @@ function App() {
 
             const adminResetTaskPenalty = (user, taskId) => {
                 const targetTask = (user.tasks || []).find(t => t.id === taskId);
-                const newTasks = (user.tasks || []).map(t => t.id === taskId ? { ...t, autoPenaltyApplied: false } : t);
-                
                 let newHistory = [...(user.pointsHistory || [])];
                 const matchingPenalty = newHistory.find(h => h.taskId === taskId && (h.points || 0) < 0 && !h.canceled);
                 const deducted = matchingPenalty ? Math.abs(matchingPenalty.points) : 2;
-                // החזר פי 2: החזרת הקנס שירד + נקודות ההגשה שמגיעות לה
-                const refund = deducted * 2;
                 
                 if (matchingPenalty) {
                     matchingPenalty.canceled = true;
                 }
-                
+
+                const expectedPoints = typeof calculateTaskExpectedPoints === 'function'
+                    ? calculateTaskExpectedPoints(targetTask)
+                    : (targetTask?.isExamPrep ? 2 : 1);
+
+                const refund = deducted + expectedPoints;
+
+                const logTime = matchingPenalty?.date ? new Date(matchingPenalty.date).getTime() : Date.now();
+                const weekStart = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM() : 0;
+                const isThisWeek = logTime >= weekStart;
+
                 const refundEntry = {
                     id: 'ph_admin_refund_' + Date.now(),
                     taskId: taskId,
                     taskTitle: targetTask?.title || matchingPenalty?.taskTitle || 'ביטול קנס משימה',
                     points: refund,
                     date: new Date().toISOString(),
-                    details: `ביטול קנס משימה והחזר נקודות הגשה כפולות (+${refund} נק') ע״י מנהל`
+                    details: `ביטול קנס משימה (+${deducted} נק') והענקת נקודות הגשה (+${expectedPoints} נק') ע״י מנהל`
                 };
                 newHistory.unshift(refundEntry);
 
+                const newTasks = (user.tasks || []).map(t => {
+                    if (t.id === taskId) {
+                        return {
+                            ...t,
+                            completed: true,
+                            completedAt: t.completedAt || new Date().toISOString(),
+                            autoPenaltyApplied: false,
+                            pointsEarned: expectedPoints,
+                            lateReason: ''
+                        };
+                    }
+                    return t;
+                });
+
+                // Streak protection:
+                let newTaskStreak = user.taskStreak !== undefined ? user.taskStreak : 0;
+                let newLongestStreak = user.longestStreak || 0;
+                let newStreakHistory = [...(user.streakHistory || [])];
+
+                const brokenIdx = newStreakHistory.findIndex(s => 
+                    s && (s.brokenByTaskId === taskId || 
+                          (targetTask && targetTask.dueDate && s.endDate && Math.abs(new Date(s.endDate).getTime() - new Date(targetTask.dueDate).getTime()) < 86400000))
+                );
+
+                if (brokenIdx !== -1) {
+                    const brokenRecord = newStreakHistory[brokenIdx];
+                    newStreakHistory.splice(brokenIdx, 1);
+                    if (newTaskStreak === 0) {
+                        newTaskStreak = (brokenRecord.length || 0) + 1;
+                    } else {
+                        newTaskStreak = Math.max(newTaskStreak, (brokenRecord.length || 0) + 1);
+                    }
+                } else if (newTaskStreak === 0) {
+                    newTaskStreak = 1;
+                }
+                newLongestStreak = Math.max(newLongestStreak, newTaskStreak);
+
                 const newTotal = (user.totalPoints || 0) + refund;
-                const newWeekly = (user.weeklyPoints || 0) + refund;
+                const newWeekly = (user.weeklyPoints || 0) + (isThisWeek ? refund : 0);
 
                 saveAdminUserUpdate(user.username, { 
                     tasks: newTasks,
                     totalPoints: newTotal,
                     weeklyPoints: newWeekly,
-                    pointsHistory: newHistory
+                    pointsHistory: newHistory,
+                    taskStreak: newTaskStreak,
+                    longestStreak: newLongestStreak,
+                    streakHistory: newStreakHistory
                 });
-                showToast(`בוטל קנס המשימה והוחזרו פי 2 נקודות (+${refund} נק') לחשבון! 💚`, 'success');
+                showToast(`בוטל קנס המשימה והוענקו נקודות הגשה (+${refund} נק' סה"כ) לחשבון! 💚`, 'success');
             };
 
             const showToast = (text, type = 'info') => {
@@ -1891,6 +2134,7 @@ function App() {
                         completed: false,
                         givenDate: actualGivenDate,
                         autoPenaltyApplied: false,
+                        whatsappRemindersEnabled: taskData.whatsappRemindersEnabled !== false,
                         attachments: attachments
                     };
                     updateUserData(prev => ({ ...prev, tasks: [newTask, ...prev.tasks] }));
@@ -2113,7 +2357,6 @@ function App() {
                         tasks: updatedTasks,
                         totalPoints: prev.totalPoints + pointsDelta,
                         weeklyPoints: prev.weeklyPoints + pointsDelta,
-                        highestWeeklyPoints: Math.max(Number(prev.highestWeeklyPoints) || 0, (Number(prev.weeklyPoints) || 0) + pointsDelta),
                         taskStreak: newStreak,
                         longestStreak: newLongest,
                         currentStreakStart: newStreakStart,
@@ -2193,6 +2436,7 @@ function App() {
                 updateUserData(prev => {
                     const taskToDelete = (prev.tasks || []).find(t => t.id === taskId);
                     const remainingTasks = (prev.tasks || []).filter(t => t.id !== taskId);
+                    const deletedTaskIds = Array.from(new Set([...(prev.deletedTaskIds || []), taskId]));
                     let updatedExams = prev.exams;
                     if (taskToDelete && taskToDelete.examId) {
                         updatedExams = (prev.exams || []).map(ex => {
@@ -2208,7 +2452,7 @@ function App() {
                             return ex;
                         });
                     }
-                    return { ...prev, tasks: remainingTasks, exams: updatedExams };
+                    return { ...prev, tasks: remainingTasks, deletedTaskIds, exams: updatedExams };
                 });
                 showToast('משימה נמחקה', 'success');
             };
@@ -2242,6 +2486,7 @@ function App() {
                                 subjectId: subId,
                                 title: title,
                                 lessonTopic: topic,
+                                notes: form.elements['notes'] ? form.elements['notes'].value.trim() : (t.notes || ''),
                                 givenDate: givenDate,
                                 dueDate: newDueDate || t.dueDate || '',
                                 dueTime: newDueTime || t.dueTime || '',
@@ -2403,7 +2648,6 @@ function App() {
                         exams: updatedExams,
                         totalPoints: prev.totalPoints + pointsDelta,
                         weeklyPoints: prev.weeklyPoints + pointsDelta,
-                        highestWeeklyPoints: Math.max(Number(prev.highestWeeklyPoints) || 0, (Number(prev.weeklyPoints) || 0) + pointsDelta),
                         pointsHistory: newHistory
                     });
                 });
@@ -3056,7 +3300,8 @@ function App() {
                             dueDate: ses.date,
                             startTime: ses.startTime,
                             dueTime: ses.endTime,
-                            autoPenaltyApplied: false
+                            autoPenaltyApplied: false,
+                            whatsappRemindersEnabled: true
                         };
                     });
 
@@ -3071,6 +3316,7 @@ function App() {
                                 subjectId: examPlannerData.subjectId,
                                 date: examPlannerData.date,
                                 time: examPlannerData.time || ex.time || '',
+                                notes: examPlannerData.notes !== undefined ? examPlannerData.notes : (ex.notes || ''),
                                 sessionsCount: completedTasksCount + newTasks.length,
                                 completedSessionsCount: completedTasksCount,
                                 targetHours: examPlannerData.hours,
@@ -3087,6 +3333,7 @@ function App() {
                             subjectId: examPlannerData.subjectId, 
                             date: examPlannerData.date, 
                             time: examPlannerData.time || '',
+                            notes: examPlannerData.notes || '',
                             targetHours: examPlannerData.hours, 
                             sessionsCount: examPlannerData.sessions.length, 
                             completedSessionsCount: 0,
@@ -3097,7 +3344,7 @@ function App() {
 
                 toggleModal('examPlanner', false);
                 showToast(`שובצו ${examPlannerData.sessions.length} מפגשי למידה בהצלחה! תוכלי לראות אותם במשימות. 🧠`, 'success');
-                setExamPlannerData({ step: 1, subjectId: '', examName: '', date: '', time: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '' });
+                setExamPlannerData({ step: 1, subjectId: '', examName: '', date: '', time: '', hours: 5, targetSessions: 3, sessions: [], remainingMinutes: 0, existingExamId: '', notes: '' });
             };
 
 
@@ -3107,6 +3354,7 @@ function App() {
                 const examName = e.target.examName.value;
                 const date = e.target.date.value;
                 const time = e.target.time?.value || '';
+                const notes = e.target.notes?.value?.trim() || '';
                 
                 const newExam = {
                     id: 'ex_' + Date.now(),
@@ -3114,6 +3362,7 @@ function App() {
                     examName,
                     date,
                     time,
+                    notes,
                     targetHours: 0,
                     sessionsCount: 0,
                     completedSessionsCount: 0,
@@ -3166,7 +3415,8 @@ function App() {
                     examId: targetExam ? targetExam.id : '',
                     customExamName: '',
                     customSubjectId: targetExam ? targetExam.subjectId : (activeUserData.subjects?.[0]?.id || ''),
-                    title: defaultTitle
+                    title: defaultTitle,
+                    notes: ''
                 });
                 toggleModal('singleExamSession', true);
             };
@@ -3174,7 +3424,7 @@ function App() {
             const handleCreateSingleExamSession = (e) => {
                 e.preventDefault();
                 const todayStr = new Date().toISOString().split('T')[0];
-                const { examId, customExamName, customSubjectId, title } = singleExamSessionData;
+                const { examId, customExamName, customSubjectId, title, notes } = singleExamSessionData;
                 
                 const selectedExam = (activeUserData.exams || []).find(ex => ex.id === examId);
                 const examTitle = selectedExam ? (selectedExam.examName || 'מבחן') : (customExamName.trim() || 'מבחן');
@@ -3212,6 +3462,7 @@ function App() {
                     subjectId: subjectId,
                     title: sessionTitle,
                     lessonTopic: `הכנה למבחן: ${examTitle}`,
+                    notes: (notes || '').trim(),
                     createdAt: new Date().toISOString(),
                     completed: false,
                     isLessonLog: false,
@@ -3245,6 +3496,13 @@ function App() {
                     };
                 });
 
+                setSingleExamSessionData({
+                    examId: '',
+                    customExamName: '',
+                    customSubjectId: '',
+                    title: '',
+                    notes: ''
+                });
                 toggleModal('singleExamSession', false);
                 showToast(`סשן ${nextNum} נוצר בהצלחה! 3 נקודות יוענקו בסיומו 🎯`, 'success');
             };
@@ -3851,6 +4109,26 @@ function App() {
                     const getTaskDate = (t) => t.completedAt ? new Date(t.completedAt) : (t.dueDate ? new Date(t.dueDate) : (t.createdAt ? new Date(t.createdAt) : null));
                     const isTaskInFilter = (t) => {
                         if (analyticsTimeFilter === 'all') return true;
+                        if (analyticsTimeFilter === 'today') {
+                            const now = new Date();
+                            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                            if (t.completedAt) {
+                                const cd = new Date(t.completedAt);
+                                if (!isNaN(cd.getTime())) {
+                                    const cdStr = `${cd.getFullYear()}-${String(cd.getMonth() + 1).padStart(2, '0')}-${String(cd.getDate()).padStart(2, '0')}`;
+                                    return cdStr === todayStr;
+                                }
+                            }
+                            if (t.dueDate) return t.dueDate === todayStr;
+                            if (t.createdAt) {
+                                const cd = new Date(t.createdAt);
+                                if (!isNaN(cd.getTime())) {
+                                    const cdStr = `${cd.getFullYear()}-${String(cd.getMonth() + 1).padStart(2, '0')}-${String(cd.getDate()).padStart(2, '0')}`;
+                                    return cdStr === todayStr;
+                                }
+                            }
+                            return false;
+                        }
                         const taskDate = getTaskDate(t);
                         if (!taskDate || isNaN(taskDate.getTime())) return false;
                         if (analyticsTimeFilter === 'last7') {
@@ -3869,6 +4147,11 @@ function App() {
                     const isExamInFilter = (ex) => {
                         if (analyticsTimeFilter === 'all') return true;
                         if (!ex.date) return false;
+                        if (analyticsTimeFilter === 'today') {
+                            const now = new Date();
+                            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                            return ex.date === todayStr;
+                        }
                         const exDate = new Date(ex.date);
                         if (!exDate || isNaN(exDate.getTime())) return false;
                         if (analyticsTimeFilter === 'last7') {
@@ -3889,11 +4172,13 @@ function App() {
                     const exams = rawExams.filter(isExamInFilter);
                     const printFilterLabel = analyticsTimeFilter === 'all' 
                         ? 'כל הזמנים' 
-                        : analyticsTimeFilter === 'last7'
-                            ? 'השבוע (7 ימים אחרונים)'
-                            : analyticsTimeFilter === 'last30' 
-                                ? '30 ימים אחרונים' 
-                                : formatMonthLabel(analyticsTimeFilter);
+                        : analyticsTimeFilter === 'today'
+                            ? 'היום (יום נוכחי) ☀️'
+                            : analyticsTimeFilter === 'last7'
+                                ? 'השבוע (7 ימים אחרונים)'
+                                : analyticsTimeFilter === 'last30' 
+                                    ? '30 ימים אחרונים' 
+                                    : formatMonthLabel(analyticsTimeFilter);
 
                     const printTasksWithHours = completedTasks.filter(t => t.studyDurationHours && !isNaN(Number(t.studyDurationHours)));
                     const printTotalStudyHoursNum = printTasksWithHours.reduce((sum, t) => sum + Number(t.studyDurationHours), 0);
@@ -4365,12 +4650,19 @@ function App() {
                                                                             <div className="font-bold text-stone-800 text-xs">{pen.details || pen.taskTitle || 'קנס איחור'}</div>
                                                                             <div className="text-[10px] text-stone-400">{new Date(pen.date).toLocaleDateString('he-IL')} • קנס של {Math.abs(pen.points)} נקודות</div>
                                                                         </div>
-                                                                        <button 
-                                                                            onClick={() => adminCancelPenalty(selectedAdminUser, pen)}
-                                                                            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg active:scale-95 transition-all shrink-0 shadow-xs"
-                                                                            title="ביטול קנס והחזרת נקודות הגשה (פי 2)">
-                                                                            בטל קנס והחזר פי 2 (+{Math.abs(pen.points) * 2} נק') 💚
-                                                                        </button>
+                                                                        {(() => {
+                                                                            const task = (selectedAdminUser.tasks || []).find(t => t.id === pen.taskId);
+                                                                            const expPts = typeof calculateTaskExpectedPoints === 'function' ? calculateTaskExpectedPoints(task) : 1;
+                                                                            const totalRef = Math.abs(pen.points) + expPts;
+                                                                            return (
+                                                                                <button 
+                                                                                    onClick={() => adminCancelPenalty(selectedAdminUser, pen)}
+                                                                                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg active:scale-95 transition-all shrink-0 shadow-xs"
+                                                                                    title={`ביטול קנס (+${Math.abs(pen.points)} נק') והענקת נקודות הגשה (+${expPts} נק')`}>
+                                                                                    בטל קנס (+{totalRef} נק') 💚
+                                                                                </button>
+                                                                            );
+                                                                        })()}
                                                                     </div>
                                                                 ))}
                                                             </div>
@@ -4458,14 +4750,21 @@ function App() {
                                                                     className="text-[11px] bg-white border border-stone-200 px-2 py-1 rounded-lg font-bold hover:bg-stone-100">
                                                                     {t.completed ? 'סמן כלא הושלם' : 'סמן כהושלם'}
                                                                 </button>
-                                                                {t.autoPenaltyApplied && (
-                                                                    <button 
-                                                                        onClick={() => adminResetTaskPenalty(selectedAdminUser, t.id)}
-                                                                        className="text-[11px] bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-1 rounded-lg font-bold hover:bg-emerald-100"
-                                                                        title="ביטול קנס והחזרת נקודות הגשה (פי 2)">
-                                                                        בטל קנס (פי 2 נק') 💚
-                                                                    </button>
-                                                                )}
+                                                                {t.autoPenaltyApplied && (() => {
+                                                                    const hist = selectedAdminUser.pointsHistory || [];
+                                                                    const penLog = hist.find(h => h.taskId === t.id && (h.points || 0) < 0 && !h.canceled);
+                                                                    const penPts = penLog ? Math.abs(penLog.points) : 2;
+                                                                    const expPts = typeof calculateTaskExpectedPoints === 'function' ? calculateTaskExpectedPoints(t) : 1;
+                                                                    const totalRef = penPts + expPts;
+                                                                    return (
+                                                                        <button 
+                                                                            onClick={() => adminResetTaskPenalty(selectedAdminUser, t.id)}
+                                                                            className="text-[11px] bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-1 rounded-lg font-bold hover:bg-emerald-100"
+                                                                            title={`ביטול קנס (+${penPts} נק') והענקת נקודות הגשה (+${expPts} נק')`}>
+                                                                            בטל קנס (+{totalRef} נק') 💚
+                                                                        </button>
+                                                                    );
+                                                                })()}
                                                                 <button 
                                                                     onClick={() => adminDeleteTask(selectedAdminUser, t.id)}
                                                                     className="p-1.5 text-stone-400 hover:text-rose-600 rounded-lg"
@@ -4681,6 +4980,1089 @@ function App() {
             const safePointsHistory = activeUserData.pointsHistory || [];
             const safeStreakHistory = activeUserData.streakHistory || [];
 
+            
+            // =========================================================================
+            // PSYCHOMETRY MODULE (פסיכומטרי דו-תחומי)
+            // =========================================================================
+            const PsychometrySection = ({ activeUserData, updateUserData, showToast }) => {
+                const psycho = activeUserData.psychometry || { essays: [], mentalMathLogs: [], sections: [] };
+                const essays = psycho.essays || [];
+                const mathLogs = psycho.mentalMathLogs || [];
+                const sections = psycho.sections || [];
+
+                // Audio chime helper
+                const playSound = (type = 'chime') => {
+                    try {
+                        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                        if (type === 'warning') {
+                            const osc = ctx.createOscillator();
+                            const gain = ctx.createGain();
+                            osc.connect(gain);
+                            gain.connect(ctx.destination);
+                            osc.frequency.setValueAtTime(440, ctx.currentTime);
+                            osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
+                            gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+                            osc.start();
+                            osc.stop(ctx.currentTime + 0.4);
+                        } else {
+                            const osc = ctx.createOscillator();
+                            const gain = ctx.createGain();
+                            osc.connect(gain);
+                            gain.connect(ctx.destination);
+                            osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                            osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
+                            gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+                            osc.start();
+                            osc.stop(ctx.currentTime + 0.35);
+                        }
+                    } catch(e) {}
+                };
+
+                // Date helpers
+                const getWeekBounds = (baseDate = new Date()) => {
+                    const d = new Date(baseDate);
+                    const start = new Date(d);
+                    start.setDate(d.getDate() - d.getDay()); // Sunday 00:00:00
+                    start.setHours(0,0,0,0);
+                    const end = new Date(start);
+                    end.setDate(start.getDate() + 6); // Saturday 23:59:59
+                    end.setHours(23,59,59,999);
+                    return { start, end };
+                };
+
+                const toIsoDate = (d) => {
+                    const date = new Date(d);
+                    const y = date.getFullYear();
+                    const m = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    return `${y}-${m}-${day}`;
+                };
+
+                const now = new Date();
+                const { start: weekStart, end: weekEnd } = useMemo(() => getWeekBounds(now), []);
+                const todayStr = useMemo(() => toIsoDate(now), []);
+
+                // Filter current week
+                const thisWeekEssays = useMemo(() => {
+                    return essays.filter(e => {
+                        const d = new Date(e.date || e.createdAt);
+                        return !isNaN(d.getTime()) && d >= weekStart && d <= weekEnd;
+                    });
+                }, [essays, weekStart, weekEnd]);
+
+                const thisWeekSections = useMemo(() => {
+                    return sections.filter(s => {
+                        const d = new Date(s.date || s.createdAt);
+                        return !isNaN(d.getTime()) && d >= weekStart && d <= weekEnd;
+                    });
+                }, [sections, weekStart, weekEnd]);
+
+                const hasDoneMathToday = useMemo(() => {
+                    return mathLogs.some(l => l.date === todayStr);
+                }, [mathLogs, todayStr]);
+
+                // Streaks calculation
+                const calcDailyStreak = (logs) => {
+                    if (!logs || logs.length === 0) return 0;
+                    const dateSet = new Set(logs.map(l => l.date));
+                    let streak = 0;
+                    let check = new Date(now);
+                    const tStr = toIsoDate(check);
+                    if (dateSet.has(tStr)) {
+                        streak++;
+                        check.setDate(check.getDate() - 1);
+                    } else {
+                        check.setDate(check.getDate() - 1);
+                        if (!dateSet.has(toIsoDate(check))) return 0;
+                    }
+                    while (true) {
+                        const s = toIsoDate(check);
+                        if (dateSet.has(s)) {
+                            streak++;
+                            check.setDate(check.getDate() - 1);
+                        } else {
+                            break;
+                        }
+                    }
+                    return streak;
+                };
+
+                const calcWeeklyStreak = (items, targetPerWeek) => {
+                    if (!items || items.length === 0) return 0;
+                    const countInWeek = (s, e) => items.filter(it => {
+                        const d = new Date(it.date || it.createdAt);
+                        return !isNaN(d.getTime()) && d >= s && d <= e;
+                    }).length;
+
+                    let streak = 0;
+                    if (countInWeek(weekStart, weekEnd) >= targetPerWeek) streak++;
+
+                    let checkStart = new Date(weekStart);
+                    while (true) {
+                        checkStart.setDate(checkStart.getDate() - 7);
+                        const checkEnd = new Date(checkStart);
+                        checkEnd.setDate(checkStart.getDate() + 6);
+                        checkEnd.setHours(23,59,59,999);
+                        if (countInWeek(checkStart, checkEnd) >= targetPerWeek) {
+                            streak++;
+                        } else {
+                            break;
+                        }
+                    }
+                    return streak;
+                };
+
+                const essayStreakWeeks = useMemo(() => calcWeeklyStreak(essays, 2), [essays, weekStart, weekEnd]);
+                const mathStreakDays = useMemo(() => calcDailyStreak(mathLogs), [mathLogs]);
+                const sectionStreakWeeks = useMemo(() => calcWeeklyStreak(sections, 4), [sections, weekStart, weekEnd]);
+
+                // Modal & Form States
+                const [isEssayModalOpen, setIsEssayModalOpen] = useState(false);
+                const [isSectionModalOpen, setIsSectionModalOpen] = useState(false);
+                const [selectedSectionForMistakes, setSelectedSectionForMistakes] = useState(null);
+
+                // Essay form
+                const [essayTopic, setEssayTopic] = useState('');
+                const [essayDate, setEssayDate] = useState(() => todayStr);
+                const [essayNotes, setEssayNotes] = useState('');
+
+                // Section form
+                const [secType, setSecType] = useState('quantitative'); // 'quantitative' (20) | 'verbal' (23)
+                const [secCorrect, setSecCorrect] = useState('');
+                const [secSource, setSecSource] = useState('');
+                const [secTime, setSecTime] = useState('20');
+                const [secDate, setSecDate] = useState(() => todayStr);
+                const [secMistakeReasons, setSecMistakeReasons] = useState([]);
+                const [secMistakeNote, setSecMistakeNote] = useState('');
+
+                // =========================================================
+                // TIMER 1: Mental Math (15:00)
+                // =========================================================
+                const [mathTimerSecs, setMathTimerSecs] = useState(15 * 60);
+                const [isMathTimerRunning, setIsMathTimerRunning] = useState(false);
+                const mathIntervalRef = useRef(null);
+
+                useEffect(() => {
+                    if (isMathTimerRunning) {
+                        mathIntervalRef.current = setInterval(() => {
+                            setMathTimerSecs(prev => {
+                                if (prev <= 1) {
+                                    clearInterval(mathIntervalRef.current);
+                                    setIsMathTimerRunning(false);
+                                    playSound('chime');
+                                    handleCompleteMentalMath(true);
+                                    return 15 * 60;
+                                }
+                                return prev - 1;
+                            });
+                        }, 1000);
+                    } else if (mathIntervalRef.current) {
+                        clearInterval(mathIntervalRef.current);
+                    }
+                    return () => clearInterval(mathIntervalRef.current);
+                }, [isMathTimerRunning]);
+
+                // =========================================================
+                // TIMER 2: Section 20-min Timer with 5-minute warning
+                // =========================================================
+                const [sectionTimerSecs, setSectionTimerSecs] = useState(20 * 60);
+                const [isSectionTimerRunning, setIsSectionTimerRunning] = useState(false);
+                const [sectionTimerWarningFired, setSectionTimerWarningFired] = useState(false);
+                const [sectionTimerType, setSectionTimerType] = useState('quantitative');
+                const sectionIntervalRef = useRef(null);
+
+                useEffect(() => {
+                    if (isSectionTimerRunning) {
+                        sectionIntervalRef.current = setInterval(() => {
+                            setSectionTimerSecs(prev => {
+                                // 5 minutes warning at exactly 5:00 (300s)
+                                if (prev === 300 && !sectionTimerWarningFired) {
+                                    setSectionTimerWarningFired(true);
+                                    playSound('warning');
+                                    if (showToast) showToast('⚠️ נותרו 5 דקות לסיום הפרק! להתחיל לסמן שאלות שלא הספקת!', 'warning');
+                                }
+                                if (prev <= 1) {
+                                    clearInterval(sectionIntervalRef.current);
+                                    setIsSectionTimerRunning(false);
+                                    playSound('chime');
+                                    if (showToast) showToast('נגמר הזמן לפרק! נא להזין תוצאה ⏱️', 'info');
+                                    setSecType(sectionTimerType);
+                                    setSecTime('20');
+                                    setIsSectionModalOpen(true);
+                                    setSectionTimerSecs(20 * 60);
+                                    setSectionTimerWarningFired(false);
+                                    return 20 * 60;
+                                }
+                                return prev - 1;
+                            });
+                        }, 1000);
+                    } else if (sectionIntervalRef.current) {
+                        clearInterval(sectionIntervalRef.current);
+                    }
+                    return () => clearInterval(sectionIntervalRef.current);
+                }, [isSectionTimerRunning, sectionTimerWarningFired, sectionTimerType]);
+
+                // =========================================================
+                // TIMER 3: Guided Essay (30:00) with 3 phases
+                // =========================================================
+                const [essayTimerSecs, setEssayTimerSecs] = useState(30 * 60);
+                const [isEssayTimerRunning, setIsEssayTimerRunning] = useState(false);
+                const essayIntervalRef = useRef(null);
+
+                useEffect(() => {
+                    if (isEssayTimerRunning) {
+                        essayIntervalRef.current = setInterval(() => {
+                            setEssayTimerSecs(prev => {
+                                if (prev <= 1) {
+                                    clearInterval(essayIntervalRef.current);
+                                    setIsEssayTimerRunning(false);
+                                    playSound('chime');
+                                    if (showToast) showToast('הסתיים זמן החיבור (30 דקות)! נפתח טופס השמירה ✍️', 'success');
+                                    setIsEssayModalOpen(true);
+                                    setEssayTimerSecs(30 * 60);
+                                    return 30 * 60;
+                                }
+                                return prev - 1;
+                            });
+                        }, 1000);
+                    } else if (essayIntervalRef.current) {
+                        clearInterval(essayIntervalRef.current);
+                    }
+                    return () => clearInterval(essayIntervalRef.current);
+                }, [isEssayTimerRunning]);
+
+                // Essay timer phase
+                const essayPhase = useMemo(() => {
+                    const elapsed = 30 * 60 - essayTimerSecs;
+                    if (elapsed < 5 * 60) {
+                        return { step: 1, title: 'שלב 1: תכנון וסיעור מוחות (עוד ' + Math.ceil((300 - elapsed) / 60) + " דק')", color: 'text-amber-600 bg-amber-50' };
+                    } else if (elapsed < 25 * 60) {
+                        return { step: 2, title: 'שלב 2: כתיבת הפסקאות (עוד ' + Math.ceil((1500 - elapsed) / 60) + " דק')", color: 'text-indigo-600 bg-indigo-50' };
+                    } else {
+                        return { step: 3, title: 'שלב 3: הגהה וליטוש לשוני (עוד ' + Math.ceil((1800 - elapsed) / 60) + " דק')", color: 'text-emerald-600 bg-emerald-50' };
+                    }
+                }, [essayTimerSecs]);
+
+                // Accuracy statistics
+                const stats = useMemo(() => {
+                    const quantSecs = sections.filter(s => s.type === 'quantitative');
+                    const verbalSecs = sections.filter(s => s.type === 'verbal');
+
+                    const quantAvg = quantSecs.length > 0 
+                        ? (quantSecs.reduce((a, c) => a + (c.correct || 0), 0) / quantSecs.length).toFixed(1)
+                        : null;
+                    const quantPct = quantSecs.length > 0
+                        ? Math.round((quantSecs.reduce((a, c) => a + (c.correct || 0), 0) / (quantSecs.length * 20)) * 100)
+                        : null;
+
+                    const verbalAvg = verbalSecs.length > 0
+                        ? (verbalSecs.reduce((a, c) => a + (c.correct || 0), 0) / verbalSecs.length).toFixed(1)
+                        : null;
+                    const verbalPct = verbalSecs.length > 0
+                        ? Math.round((verbalSecs.reduce((a, c) => a + (c.correct || 0), 0) / (verbalSecs.length * 23)) * 100)
+                        : null;
+
+                    return { quantAvg, quantPct, quantCount: quantSecs.length, verbalAvg, verbalPct, verbalCount: verbalSecs.length, totalCount: sections.length };
+                }, [sections]);
+
+                // Actions
+                const handleCompleteMentalMath = (fromTimer = false) => {
+                    if (hasDoneMathToday) {
+                        if (showToast) showToast('כבר השלמת את יעד החישוב המהיר להיום! אלופה 🔥', 'info');
+                        return;
+                    }
+                    const newLog = { id: 'pmm_' + Date.now(), date: todayStr, durationMinutes: 15, timestamp: Date.now() };
+                    const nextLogs = [newLog, ...mathLogs];
+
+                    updateUserData(user => {
+                        const currentPsycho = user.psychometry || {};
+                        const prevPts = user.weeklyPoints || 0;
+                        const prevTot = user.totalPoints || 0;
+                        return {
+                            ...user,
+                            weeklyPoints: prevPts + 15,
+                            totalPoints: prevTot + 15,
+                            taskStreak: (user.taskStreak || 0) > 0 ? user.taskStreak : 1,
+                            psychometry: { ...currentPsycho, mentalMathLogs: nextLogs }
+                        };
+                    });
+
+                    playSound('chime');
+                    if (showToast) showToast('15 דקות חישוב מהיר הושלמו! הרצף היומי נשמר 🔥 (+15 נקודות)', 'success');
+                };
+
+                const handleSaveEssay = (e) => {
+                    e.preventDefault();
+                    const newEssay = {
+                        id: 'pe_' + Date.now(),
+                        topic: essayTopic.trim() || 'מטלת כתיבה שבועית',
+                        date: essayDate || todayStr,
+                        notes: essayNotes.trim(),
+                        createdAt: Date.now()
+                    };
+                    const nextEssays = [newEssay, ...essays];
+
+                    updateUserData(user => {
+                        const currentPsycho = user.psychometry || {};
+                        const prevPts = user.weeklyPoints || 0;
+                        const prevTot = user.totalPoints || 0;
+                        return {
+                            ...user,
+                            weeklyPoints: prevPts + 25,
+                            totalPoints: prevTot + 25,
+                            taskStreak: (user.taskStreak || 0) > 0 ? user.taskStreak : 1,
+                            psychometry: { ...currentPsycho, essays: nextEssays }
+                        };
+                    });
+
+                    playSound('chime');
+                    setIsEssayModalOpen(false);
+                    setEssayTopic('');
+                    setEssayNotes('');
+                    if (showToast) showToast('החיבור תועד בהצלחה! +25 נקודות ✍️🎉', 'success');
+                };
+
+                const handleDeleteEssay = (id) => {
+                    if (!confirm('האם למחוק חיבור זה מהרשימה?')) return;
+                    const nextEssays = essays.filter(e => e.id !== id);
+                    updateUserData(user => ({
+                        ...user,
+                        psychometry: { ...(user.psychometry || {}), essays: nextEssays }
+                    }));
+                    if (showToast) showToast('החיבור נמחק', 'info');
+                };
+
+                const handleSaveSection = (e) => {
+                    e.preventDefault();
+                    const maxQ = secType === 'quantitative' ? 20 : 23;
+                    const correctNum = parseInt(secCorrect, 10);
+                    if (isNaN(correctNum) || correctNum < 0 || correctNum > maxQ) {
+                        if (showToast) showToast(`מספר תשובות לא תקין (חייב להיות 0-${maxQ})`, 'warning');
+                        return;
+                    }
+
+                    const newSection = {
+                        id: 'ps_' + Date.now(),
+                        type: secType,
+                        correct: correctNum,
+                        total: maxQ,
+                        mistakes: maxQ - correctNum,
+                        percentage: Math.round((correctNum / maxQ) * 100),
+                        source: secSource.trim() || (secType === 'quantitative' ? 'פרק כמותי' : 'פרק מילולי'),
+                        timeMinutes: parseInt(secTime, 10) || 20,
+                        date: secDate || todayStr,
+                        mistakeReasons: secMistakeReasons,
+                        mistakeNote: secMistakeNote.trim(),
+                        createdAt: Date.now()
+                    };
+                    const nextSections = [newSection, ...sections];
+
+                    updateUserData(user => {
+                        const currentPsycho = user.psychometry || {};
+                        const prevPts = user.weeklyPoints || 0;
+                        const prevTot = user.totalPoints || 0;
+                        return {
+                            ...user,
+                            weeklyPoints: prevPts + 20,
+                            totalPoints: prevTot + 20,
+                            taskStreak: (user.taskStreak || 0) > 0 ? user.taskStreak : 1,
+                            psychometry: { ...currentPsycho, sections: nextSections }
+                        };
+                    });
+
+                    playSound('chime');
+                    setIsSectionModalOpen(false);
+                    setSecCorrect('');
+                    setSecSource('');
+                    setSecMistakeReasons([]);
+                    setSecMistakeNote('');
+                    if (showToast) {
+                        showToast(`פרק תועד בהצלחה! ${correctNum}/${maxQ} (${newSection.percentage}%) • +20 נקודות 🎯`, 'success');
+                    }
+                };
+
+                const handleDeleteSection = (id) => {
+                    if (!confirm('האם למחוק פרק זה מהרשימה?')) return;
+                    const nextSections = sections.filter(s => s.id !== id);
+                    updateUserData(user => ({
+                        ...user,
+                        psychometry: { ...(user.psychometry || {}), sections: nextSections }
+                    }));
+                    if (showToast) showToast('הפרק נמחק', 'info');
+                };
+
+                const toggleMistakeReason = (reason) => {
+                    setSecMistakeReasons(prev => 
+                        prev.includes(reason) ? prev.filter(r => r !== reason) : [...prev, reason]
+                    );
+                };
+
+                const fmtTimer = (totalSeconds) => {
+                    const m = Math.floor(totalSeconds / 60);
+                    const s = totalSeconds % 60;
+                    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+                };
+
+                return (
+                    <div className="space-y-6 animate-[fadeIn_0.3s_ease-out]">
+                        {/* Header Banner */}
+                        <div className="bg-gradient-to-br from-indigo-950 via-purple-950 to-slate-900 text-white rounded-3xl p-6 md:p-8 shadow-xl relative overflow-hidden">
+                            <div className="absolute -right-10 -bottom-10 w-48 h-48 bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
+                            <div className="absolute -left-10 -top-10 w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl pointer-events-none"></div>
+
+                            <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                                <div>
+                                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                        <span className="bg-indigo-500/30 border border-indigo-400/40 text-indigo-200 text-xs font-black px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1.5">
+                                            <span>🎯</span> פסיכומטרי דו-תחומי
+                                        </span>
+                                        <span className="text-xs text-indigo-300 font-medium bg-white/5 px-2.5 py-1 rounded-full border border-white/10">
+                                            שבוע א'-ש' ({weekStart.toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})} - {weekEnd.toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})})
+                                        </span>
+                                    </div>
+                                    <h2 className="text-2xl md:text-3xl font-black text-white tracking-tight">
+                                        הסטריקים של הפסיכומטרי 🔥
+                                    </h2>
+                                    <p className="text-xs md:text-sm text-purple-200/90 mt-1 max-w-xl">
+                                        כמותי (20 שאלות) ומילולי (23 שאלות + חיבור). כל למידה כאן מחזקת גם את הסטריק הראשי באפליקציה!
+                                    </p>
+                                </div>
+
+                                <div className="flex items-center gap-2.5 flex-wrap">
+                                    <div className="bg-white/10 backdrop-blur-md border border-white/10 px-3.5 py-2.5 rounded-2xl flex items-center gap-2.5">
+                                        <span className="text-2xl">✍️</span>
+                                        <div>
+                                            <div className="text-[10px] text-purple-200 font-bold uppercase">חיבורים השבוע</div>
+                                            <div className="text-sm font-black text-white">{thisWeekEssays.length} / 2</div>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white/10 backdrop-blur-md border border-white/10 px-3.5 py-2.5 rounded-2xl flex items-center gap-2.5">
+                                        <span className="text-2xl">🧮</span>
+                                        <div>
+                                            <div className="text-[10px] text-purple-200 font-bold uppercase">חישוב יומי</div>
+                                            <div className="text-sm font-black text-white">{hasDoneMathToday ? 'הושלם! 🎉' : 'טרם בוצע'}</div>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white/10 backdrop-blur-md border border-white/10 px-3.5 py-2.5 rounded-2xl flex items-center gap-2.5">
+                                        <span className="text-2xl">⏱️</span>
+                                        <div>
+                                            <div className="text-[10px] text-purple-200 font-bold uppercase">פרקים השבוע</div>
+                                            <div className="text-sm font-black text-white">{thisWeekSections.length} / 4</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Accuracy Statistics (Idea 4) */}
+                        {stats.totalCount > 0 && (
+                            <div className="bg-white p-5 rounded-3xl border border-stone-200/80 shadow-xs">
+                                <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-lg">📊</span>
+                                        <span className="font-bold text-stone-800 text-sm">מדד דיוק ממוצע (מצטבר)</span>
+                                    </div>
+                                    <span className="text-xs text-stone-400 font-medium">סך הכל נפתרו {stats.totalCount} פרקים</span>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="p-4 bg-blue-50/60 rounded-2xl border border-blue-100 flex items-center justify-between">
+                                        <div>
+                                            <div className="text-xs font-bold text-blue-900 flex items-center gap-1.5">
+                                                <span>📐</span> חשיבה כמותית (מתוך 20)
+                                            </div>
+                                            <div className="text-xs text-blue-600 mt-0.5">{stats.quantCount} פרקים נפתרו</div>
+                                        </div>
+                                        <div className="text-left">
+                                            {stats.quantAvg ? (
+                                                <>
+                                                    <div className="text-xl font-black text-blue-950">{stats.quantAvg} / 20</div>
+                                                    <div className="text-xs font-bold text-blue-700">{stats.quantPct}% דיוק</div>
+                                                </>
+                                            ) : (
+                                                <span className="text-xs text-stone-400">טרם נפתר</span>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="p-4 bg-purple-50/60 rounded-2xl border border-purple-100 flex items-center justify-between">
+                                        <div>
+                                            <div className="text-xs font-bold text-purple-900 flex items-center gap-1.5">
+                                                <span>📖</span> חשיבה מילולית (מתוך 23)
+                                            </div>
+                                            <div className="text-xs text-purple-600 mt-0.5">{stats.verbalCount} פרקים נפתרו</div>
+                                        </div>
+                                        <div className="text-left">
+                                            {stats.verbalAvg ? (
+                                                <>
+                                                    <div className="text-xl font-black text-purple-950">{stats.verbalAvg} / 23</div>
+                                                    <div className="text-xs font-bold text-purple-700">{stats.verbalPct}% דיוק</div>
+                                                </>
+                                            ) : (
+                                                <span className="text-xs text-stone-400">טרם נפתר</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 3 Main Streaks Grid */}
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                            {/* ========================================================= */}
+                            {/* STREAK 1: ESSAYS (2 per week + Guided 30-min Timer) */}
+                            {/* ========================================================= */}
+                            <div className="bg-white rounded-3xl p-6 border border-stone-200/80 shadow-sm flex flex-col justify-between hover:border-amber-200 transition-all">
+                                <div>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center text-lg shadow-2xs">
+                                                ✍️
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-stone-800 text-base">מטלת כתיבה</h3>
+                                                <div className="text-xs text-stone-500 font-medium">יעד: 2 חיבורים בשבוע (א'-ש')</div>
+                                            </div>
+                                        </div>
+                                        <span className="text-xs font-bold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-xl border border-amber-200/70 inline-flex items-center gap-1">
+                                            <span>🏆</span> {essayStreakWeeks} {essayStreakWeeks === 1 ? 'שבוע' : 'שבועות'} רצופים
+                                        </span>
+                                    </div>
+
+                                    {/* Progress Bar */}
+                                    <div className="mt-3 mb-4">
+                                        <div className="flex justify-between items-center text-xs font-bold mb-1.5">
+                                            <span className="text-stone-600">התקדמות השבוע</span>
+                                            <span className={thisWeekEssays.length >= 2 ? 'text-emerald-600 font-black' : 'text-stone-800'}>
+                                                {thisWeekEssays.length} / 2 {thisWeekEssays.length >= 2 ? '• הושלם! 🎉' : ''}
+                                            </span>
+                                        </div>
+                                        <div className="w-full h-3 bg-stone-100 rounded-full overflow-hidden p-0.5">
+                                            <div 
+                                                className={`h-full rounded-full transition-all duration-500 ${
+                                                    thisWeekEssays.length >= 2 ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-amber-400 to-orange-500'
+                                                }`}
+                                                style={{ width: `${Math.min(100, (thisWeekEssays.length / 2) * 100)}%` }}
+                                            ></div>
+                                        </div>
+                                    </div>
+
+                                    {/* Guided 30-min Essay Timer (Idea 3) */}
+                                    <div className="p-3.5 bg-amber-50/50 rounded-2xl border border-amber-200/70 mb-4 text-center">
+                                        <div className="text-[10px] font-bold text-amber-800 uppercase tracking-wider mb-1 flex items-center justify-center gap-1">
+                                            <span>⏱️</span> טיימר כתיבה מונחה (30 דק')
+                                        </div>
+                                        <div className="text-2xl font-black text-amber-950 font-mono tracking-wider my-0.5">
+                                            {fmtTimer(essayTimerSecs)}
+                                        </div>
+                                        <div className={`text-[10px] font-bold px-2.5 py-0.5 rounded-lg inline-block mb-2 ${essayPhase.color}`}>
+                                            {essayPhase.title}
+                                        </div>
+                                        <div className="flex items-center justify-center gap-2">
+                                            <button 
+                                                onClick={() => setIsEssayTimerRunning(!isEssayTimerRunning)}
+                                                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shadow-xs active:scale-95 ${
+                                                    isEssayTimerRunning ? 'bg-amber-600 text-white' : 'bg-amber-500 hover:bg-amber-600 text-white'
+                                                }`}>
+                                                {isEssayTimerRunning ? '⏸️ השהה' : '▶️ התחל כתיבה'}
+                                            </button>
+                                            <button 
+                                                onClick={() => { setIsEssayTimerRunning(false); setEssayTimerSecs(30 * 60); }}
+                                                className="px-2.5 py-1.5 bg-stone-200 text-stone-600 rounded-xl text-xs font-bold hover:bg-stone-300">
+                                                איפוס
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Essays List */}
+                                    <div className="space-y-1.5 mb-4 max-h-36 overflow-y-auto custom-scrollbar">
+                                        <div className="text-[11px] font-bold text-stone-400 uppercase tracking-wider">חיבורים השבוע:</div>
+                                        {thisWeekEssays.length === 0 ? (
+                                            <div className="p-2.5 bg-stone-50 rounded-xl text-xs text-stone-400 text-center border border-dashed border-stone-200">
+                                                טרם נכתב חיבור השבוע.
+                                            </div>
+                                        ) : (
+                                            thisWeekEssays.map(essay => (
+                                                <div key={essay.id} className="p-2.5 bg-amber-50/70 rounded-xl border border-amber-100 flex items-center justify-between gap-2 text-xs">
+                                                    <div className="truncate flex-1">
+                                                        <div className="font-bold text-stone-800 truncate">{essay.topic}</div>
+                                                        <div className="text-[10px] text-stone-500">{new Date(essay.date).toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})}</div>
+                                                    </div>
+                                                    <button onClick={() => handleDeleteEssay(essay.id)} className="text-stone-400 hover:text-rose-600 p-1" title="מחיקה">✕</button>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
+
+                                <button 
+                                    onClick={() => setIsEssayModalOpen(true)}
+                                    className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-2xl text-xs md:text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-95">
+                                    <span>+</span> תיעוד חיבור שבוצע
+                                </button>
+                            </div>
+
+                            {/* ========================================================= */}
+                            {/* STREAK 2: MENTAL MATH (15 min daily) */}
+                            {/* ========================================================= */}
+                            <div className="bg-white rounded-3xl p-6 border border-stone-200/80 shadow-sm flex flex-col justify-between hover:border-rose-200 transition-all">
+                                <div>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-lg shadow-2xs">
+                                                🧮
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-stone-800 text-base">חישוב כמותי מהיר</h3>
+                                                <div className="text-xs text-stone-500 font-medium">כפל, חזקות, שורשים ואחוזים</div>
+                                            </div>
+                                        </div>
+                                        <span className="text-xs font-bold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-xl border border-rose-200/70 inline-flex items-center gap-1">
+                                            <span>🔥</span> {mathStreakDays} {mathStreakDays === 1 ? 'יום' : 'ימים'} רצופים
+                                        </span>
+                                    </div>
+
+                                    {/* Status Box */}
+                                    <div className={`p-3.5 rounded-2xl border mb-3 text-center transition-all ${
+                                        hasDoneMathToday ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-stone-50 border-stone-200 text-stone-700'
+                                    }`}>
+                                        <div className="text-xs font-semibold">סטטוס להיום:</div>
+                                        <div className="text-sm font-black mt-0.5 flex items-center justify-center gap-1">
+                                            {hasDoneMathToday ? '✅ 15 דקות הושלמו להיום!' : '⏳ טרם בוצע היום (יעד: 15 דק')'}
+                                        </div>
+                                    </div>
+
+                                    {/* 15-min Timer */}
+                                    <div className="bg-stone-50 p-4 rounded-2xl border border-stone-200/70 mb-4 text-center">
+                                        <div className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-1">טיימר 15 דקות אינטראקטיבי:</div>
+                                        <div className="text-3xl font-black text-stone-800 tracking-wider font-mono my-1">
+                                            {fmtTimer(mathTimerSecs)}
+                                        </div>
+                                        <div className="flex items-center justify-center gap-2 mt-2">
+                                            <button 
+                                                onClick={() => setIsMathTimerRunning(!isMathTimerRunning)}
+                                                className={`px-4 py-1.5 rounded-xl text-xs font-bold transition-all shadow-xs active:scale-95 ${
+                                                    isMathTimerRunning ? 'bg-rose-600 text-white' : 'bg-rose-500 hover:bg-rose-600 text-white'
+                                                }`}>
+                                                {isMathTimerRunning ? '⏸️ השהה' : '▶️ התחל תרגול'}
+                                            </button>
+                                            <button 
+                                                onClick={() => { setIsMathTimerRunning(false); setMathTimerSecs(15 * 60); }}
+                                                className="px-3 py-1.5 bg-stone-200 text-stone-600 rounded-xl text-xs font-bold hover:bg-stone-300">
+                                                איפוס
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <button 
+                                    disabled={hasDoneMathToday}
+                                    onClick={() => handleCompleteMentalMath(false)}
+                                    className={`w-full py-3 rounded-2xl font-bold text-xs md:text-sm flex items-center justify-center gap-2 transition-all active:scale-95 ${
+                                        hasDoneMathToday ? 'bg-emerald-100 text-emerald-700 cursor-default' : 'bg-rose-500 hover:bg-rose-600 text-white shadow-sm'
+                                    }`}>
+                                    <span>{hasDoneMathToday ? '✓' : '⚡'}</span>
+                                    {hasDoneMathToday ? 'הושלם להיום!' : 'סימנתי שביצעתי 15 דק' עכשיו!'}
+                                </button>
+                            </div>
+
+                            {/* ========================================================= */}
+                            {/* STREAK 3: 4 SECTIONS PER WEEK + 20-min Timer + Mistakes */}
+                            {/* ========================================================= */}
+                            <div className="bg-white rounded-3xl p-6 border border-stone-200/80 shadow-sm flex flex-col justify-between hover:border-indigo-200 transition-all">
+                                <div>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-lg shadow-2xs">
+                                                ⏱️
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-stone-800 text-base">פתירת פרקים בזמן</h3>
+                                                <div className="text-xs text-stone-500 font-medium">יעד: 4 פרקים בשבוע (א'-ש')</div>
+                                            </div>
+                                        </div>
+                                        <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-xl border border-indigo-200/70 inline-flex items-center gap-1">
+                                            <span>⚡</span> {sectionStreakWeeks} {sectionStreakWeeks === 1 ? 'שבוע' : 'שבועות'} רצופים
+                                        </span>
+                                    </div>
+
+                                    {/* Progress Bar */}
+                                    <div className="mt-3 mb-3">
+                                        <div className="flex justify-between items-center text-xs font-bold mb-1.5">
+                                            <span className="text-stone-600">פרקים שנפתרו השבוע</span>
+                                            <span className={thisWeekSections.length >= 4 ? 'text-emerald-600 font-black' : 'text-stone-800'}>
+                                                {thisWeekSections.length} / 4 {thisWeekSections.length >= 4 ? '• הושלם! 🎉' : ''}
+                                            </span>
+                                        </div>
+                                        <div className="w-full h-3 bg-stone-100 rounded-full overflow-hidden p-0.5">
+                                            <div 
+                                                className={`h-full rounded-full transition-all duration-500 ${
+                                                    thisWeekSections.length >= 4 ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-indigo-500 to-purple-600'
+                                                }`}
+                                                style={{ width: `${Math.min(100, (thisWeekSections.length / 4) * 100)}%` }}
+                                            ></div>
+                                        </div>
+                                    </div>
+
+                                    {/* 20-min Section Timer with 5-min warning (Idea 1) */}
+                                    <div className="p-3 bg-indigo-50/60 rounded-2xl border border-indigo-200/80 mb-3 text-center">
+                                        <div className="flex items-center justify-between mb-1">
+                                            <span className="text-[10px] font-bold text-indigo-800 uppercase">טיימר פרק (20 דק' + התראת 5 דק'):</span>
+                                            <select 
+                                                value={sectionTimerType} 
+                                                onChange={e => setSectionTimerType(e.target.value)} 
+                                                className="text-[10px] bg-white border border-indigo-200 rounded-lg px-2 py-0.5 font-bold text-indigo-900 outline-none">
+                                                <option value="quantitative">כמותי (20)</option>
+                                                <option value="verbal">מילולי (23)</option>
+                                            </select>
+                                        </div>
+                                        <div className="text-2xl font-black text-indigo-950 font-mono my-0.5">
+                                            {fmtTimer(sectionTimerSecs)}
+                                        </div>
+                                        <div className="flex items-center justify-center gap-2 mt-1">
+                                            <button 
+                                                onClick={() => setIsSectionTimerRunning(!isSectionTimerRunning)}
+                                                className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shadow-xs active:scale-95 ${
+                                                    isSectionTimerRunning ? 'bg-indigo-700 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                                                }`}>
+                                                {isSectionTimerRunning ? '⏸️ השהה' : '▶️ התחל פרק'}
+                                            </button>
+                                            <button 
+                                                onClick={() => { setIsSectionTimerRunning(false); setSectionTimerSecs(20 * 60); setSectionTimerWarningFired(false); }}
+                                                className="px-2.5 py-1 bg-stone-200 text-stone-600 rounded-xl text-xs font-bold hover:bg-stone-300">
+                                                איפוס
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Recent Sections List */}
+                                    <div className="space-y-1.5 mb-3 max-h-32 overflow-y-auto custom-scrollbar">
+                                        <div className="text-[11px] font-bold text-stone-400 uppercase tracking-wider">פרקים שנפתרו השבוע:</div>
+                                        {thisWeekSections.length === 0 ? (
+                                            <div className="p-2.5 bg-stone-50 rounded-xl text-xs text-stone-400 text-center border border-dashed border-stone-200">
+                                                טרם נפתרו פרקים השבוע.
+                                            </div>
+                                        ) : (
+                                            thisWeekSections.map(sec => {
+                                                const isQuant = sec.type === 'quantitative';
+                                                return (
+                                                    <div key={sec.id} className="p-2 bg-stone-50 rounded-xl border border-stone-200 flex items-center justify-between text-xs">
+                                                        <div className="flex items-center gap-2 truncate flex-1 cursor-pointer" onClick={() => setSelectedSectionForMistakes(sec)}>
+                                                            <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${
+                                                                isQuant ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
+                                                            }`}>
+                                                                {isQuant ? 'כמותי (20)' : 'מילולי (23)'}
+                                                            </span>
+                                                            <span className="font-black text-stone-800">{sec.correct}/{sec.total} ({sec.percentage}%)</span>
+                                                            {sec.mistakes > 0 && <span className="text-[10px] text-rose-500 font-bold">({sec.mistakes} טעויות)</span>}
+                                                        </div>
+                                                        <div className="flex items-center gap-1">
+                                                            {sec.mistakeReasons && sec.mistakeReasons.length > 0 && (
+                                                                <button onClick={() => setSelectedSectionForMistakes(sec)} className="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-bold" title="צפייה בתחקור">
+                                                                    תחקור 📝
+                                                                </button>
+                                                            )}
+                                                            <button onClick={() => handleDeleteSection(sec.id)} className="text-stone-400 hover:text-rose-600 p-1" title="מחיקה">✕</button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })
+                                        )}
+                                    </div>
+                                </div>
+
+                                <button 
+                                    onClick={() => { setSecType('quantitative'); setIsSectionModalOpen(true); }}
+                                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-2xl text-xs md:text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-95">
+                                    <span>+</span> הזנת תוצאות פרק (ידני)
+                                </button>
+                            </div>
+
+                        </div>
+
+                        {/* ========================================================= */}
+                        {/* MODAL 1: ADD ESSAY */}
+                        {/* ========================================================= */}
+                        {isEssayModalOpen && (
+                            <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
+                                <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-[slideUp_0.3s_ease-out] pb-safe-bottom">
+                                    <div className="flex justify-between items-center mb-5">
+                                        <h3 className="font-bold text-xl text-stone-800 flex items-center gap-2">
+                                            <span className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center text-sm">✍️</span>
+                                            תיעוד מטלת כתיבה
+                                        </h3>
+                                        <button onClick={() => setIsEssayModalOpen(false)} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
+                                    </div>
+                                    <form onSubmit={handleSaveEssay} className="space-y-4">
+                                        <div>
+                                            <label className="text-xs font-bold text-stone-500 block mb-1">נושא החיבור / מקור</label>
+                                            <input 
+                                                type="text" 
+                                                required 
+                                                placeholder="למשל: הגבלת שימוש ברשתות חברתיות לנוער" 
+                                                value={essayTopic} 
+                                                onChange={e => setEssayTopic(e.target.value)}
+                                                className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-amber-400 outline-none"
+                                            />
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-500 block mb-1">תאריך כתיבה</label>
+                                                <input 
+                                                    type="date" 
+                                                    value={essayDate} 
+                                                    onChange={e => setEssayDate(e.target.value)}
+                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-amber-400 outline-none"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-500 block mb-1">זמן שהוקדש</label>
+                                                <input 
+                                                    type="text" 
+                                                    readOnly 
+                                                    value="30 דקות בדיוק ⏱️" 
+                                                    className="w-full p-3 bg-stone-100 border border-stone-200 rounded-2xl text-sm font-bold text-stone-600 outline-none"
+                                                />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-stone-500 block mb-1">הערות / משוב עצמי (אופציונלי)</label>
+                                            <textarea 
+                                                rows="2"
+                                                placeholder="האם עמדתי בזמנים? שמירה על פסקת איזון? עושר לשוני..." 
+                                                value={essayNotes} 
+                                                onChange={e => setEssayNotes(e.target.value)}
+                                                className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-amber-400 outline-none"
+                                            ></textarea>
+                                        </div>
+                                        <div className="pt-2 flex gap-3">
+                                            <button 
+                                                type="button" 
+                                                onClick={() => setIsEssayModalOpen(false)}
+                                                className="flex-1 py-3 text-stone-500 font-bold bg-stone-100 rounded-2xl text-sm hover:bg-stone-200">
+                                                ביטול
+                                            </button>
+                                            <button 
+                                                type="submit" 
+                                                className="flex-1 py-3 text-white font-bold bg-amber-500 hover:bg-amber-600 rounded-2xl text-sm shadow-md shadow-amber-500/20">
+                                                שמירה לסטריק ✨ (+25 נק')
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* ========================================================= */}
+                        {/* MODAL 2: ADD SECTION WITH MISTAKE ANALYSIS (Ideas 1 & 2) */}
+                        {/* ========================================================= */}
+                        {isSectionModalOpen && (
+                            <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
+                                <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-[slideUp_0.3s_ease-out] max-h-[90vh] overflow-y-auto custom-scrollbar pb-safe-bottom">
+                                    <div className="flex justify-between items-center mb-5">
+                                        <h3 className="font-bold text-xl text-stone-800 flex items-center gap-2">
+                                            <span className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-sm">⏱️</span>
+                                            הזנת תוצאות ותחקור פרק
+                                        </h3>
+                                        <button onClick={() => setIsSectionModalOpen(false)} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
+                                    </div>
+                                    <form onSubmit={handleSaveSection} className="space-y-4">
+                                        {/* Type Selector */}
+                                        <div>
+                                            <label className="text-xs font-bold text-stone-500 block mb-1">סוג הפרק</label>
+                                            <div className="grid grid-cols-2 gap-2 bg-stone-100 p-1.5 rounded-2xl">
+                                                <button 
+                                                    type="button" 
+                                                    onClick={() => setSecType('quantitative')}
+                                                    className={`py-2 rounded-xl text-xs font-bold transition-all ${
+                                                        secType === 'quantitative' ? 'bg-white text-indigo-700 shadow-xs' : 'text-stone-500'
+                                                    }`}>
+                                                    כמותי (מתוך 20)
+                                                </button>
+                                                <button 
+                                                    type="button" 
+                                                    onClick={() => setSecType('verbal')}
+                                                    className={`py-2 rounded-xl text-xs font-bold transition-all ${
+                                                        secType === 'verbal' ? 'bg-white text-purple-700 shadow-xs' : 'text-stone-500'
+                                                    }`}>
+                                                    מילולי (מתוך 23)
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Correct count */}
+                                        <div>
+                                            <label className="text-xs font-bold text-stone-500 block mb-1">
+                                                כמה תשובות נכונות צדקת? (מתוך {secType === 'quantitative' ? '20' : '23'})
+                                            </label>
+                                            <div className="flex items-center gap-3">
+                                                <input 
+                                                    type="number" 
+                                                    min="0" 
+                                                    max={secType === 'quantitative' ? 20 : 23} 
+                                                    required 
+                                                    placeholder="למשל 18"
+                                                    value={secCorrect} 
+                                                    onChange={e => setSecCorrect(e.target.value)}
+                                                    className="flex-1 p-3 bg-stone-50 border border-stone-200 rounded-2xl text-lg font-black text-center focus:border-indigo-400 outline-none"
+                                                />
+                                                <div className="text-sm font-black text-stone-500">
+                                                    מתוך {secType === 'quantitative' ? '20' : '23'}
+                                                </div>
+                                            </div>
+                                            {secCorrect !== '' && !isNaN(parseInt(secCorrect, 10)) && (
+                                                <div className="mt-1.5 text-xs font-bold text-indigo-600 text-center">
+                                                    דיוק: {Math.round((parseInt(secCorrect, 10) / (secType === 'quantitative' ? 20 : 23)) * 100)}% הצלחה! 🎯
+                                                    {parseInt(secCorrect, 10) < (secType === 'quantitative' ? 20 : 23) && (
+                                                        <span className="text-rose-500 mr-1.5">
+                                                            ({(secType === 'quantitative' ? 20 : 23) - parseInt(secCorrect, 10)} טעויות)
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Mistake Analysis Section (Idea 2) */}
+                                        {secCorrect !== '' && parseInt(secCorrect, 10) < (secType === 'quantitative' ? 20 : 23) && (
+                                            <div className="p-3.5 bg-rose-50/70 border border-rose-200/80 rounded-2xl space-y-2">
+                                                <div className="text-xs font-bold text-rose-900 flex items-center gap-1.5">
+                                                    <span>🔍</span> תחקור מהיר: ממה נבעו הטעויות?
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-1.5">
+                                                    {[
+                                                        { id: 'careless', label: '🤦‍♀️ חוסר תשומת לב / מלכודת' },
+                                                        { id: 'time', label: '⏰ ניהול זמן / היתקעות' },
+                                                        { id: 'gap', label: '❌ חוסר ידע / חומר' },
+                                                        { id: 'guess', label: '🎲 ניחוש' }
+                                                    ].map(opt => (
+                                                        <button 
+                                                            key={opt.id}
+                                                            type="button" 
+                                                            onClick={() => toggleMistakeReason(opt.id)}
+                                                            className={`p-2 rounded-xl text-[11px] font-bold text-right transition-all border ${
+                                                                secMistakeReasons.includes(opt.id) 
+                                                                    ? 'bg-rose-500 text-white border-rose-500 shadow-xs' 
+                                                                    : 'bg-white text-stone-700 border-stone-200 hover:border-rose-300'
+                                                            }`}>
+                                                            {opt.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                                <div>
+                                                    <input 
+                                                        type="text" 
+                                                        placeholder="הערת תחקור (מה לעשות פעם הבאה...)" 
+                                                        value={secMistakeNote} 
+                                                        onChange={e => setSecMistakeNote(e.target.value)}
+                                                        className="w-full p-2.5 bg-white border border-stone-200 rounded-xl text-xs font-medium outline-none focus:border-rose-400"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-500 block mb-1">זמן (דקות)</label>
+                                                <input 
+                                                    type="number" 
+                                                    value={secTime} 
+                                                    onChange={e => setSecTime(e.target.value)}
+                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-indigo-400 outline-none"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-xs font-bold text-stone-500 block mb-1">תאריך פתירה</label>
+                                                <input 
+                                                    type="date" 
+                                                    value={secDate} 
+                                                    onChange={e => setSecDate(e.target.value)}
+                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-indigo-400 outline-none"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <label className="text-xs font-bold text-stone-500 block mb-1">מקור הפרק / מועד (אופציונלי)</label>
+                                            <input 
+                                                type="text" 
+                                                placeholder="למשל: סימולציה 3 פרק 1, מועד סתיו 2025" 
+                                                value={secSource} 
+                                                onChange={e => setSecSource(e.target.value)}
+                                                className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-indigo-400 outline-none"
+                                            />
+                                        </div>
+
+                                        <div className="pt-2 flex gap-3">
+                                            <button 
+                                                type="button" 
+                                                onClick={() => setIsSectionModalOpen(false)}
+                                                className="flex-1 py-3 text-stone-500 font-bold bg-stone-100 rounded-2xl text-sm hover:bg-stone-200">
+                                                ביטול
+                                            </button>
+                                            <button 
+                                                type="submit" 
+                                                className="flex-1 py-3 text-white font-bold bg-indigo-600 hover:bg-indigo-700 rounded-2xl text-sm shadow-md shadow-indigo-600/20">
+                                                שמירה לסטריק ✨ (+20 נק')
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* ========================================================= */}
+                        {/* MODAL 3: VIEW MISTAKE DETAILS */}
+                        {/* ========================================================= */}
+                        {selectedSectionForMistakes && (
+                            <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
+                                <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-[slideUp_0.3s_ease-out] pb-safe-bottom">
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h3 className="font-bold text-lg text-stone-800 flex items-center gap-2">
+                                            <span>📝</span> תחקור פרק: {selectedSectionForMistakes.source || 'ללא שם'}
+                                        </h3>
+                                        <button onClick={() => setSelectedSectionForMistakes(null)} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
+                                    </div>
+                                    <div className="space-y-3 text-sm">
+                                        <div className="p-3 bg-stone-50 rounded-2xl flex justify-between items-center">
+                                            <span className="font-bold text-stone-600">תוצאה:</span>
+                                            <span className="font-black text-indigo-700">{selectedSectionForMistakes.correct}/{selectedSectionForMistakes.total} ({selectedSectionForMistakes.percentage}%)</span>
+                                        </div>
+                                        <div className="p-3 bg-stone-50 rounded-2xl flex justify-between items-center">
+                                            <span className="font-bold text-stone-600">טעויות:</span>
+                                            <span className="font-black text-rose-600">{selectedSectionForMistakes.mistakes} טעויות</span>
+                                        </div>
+                                        {selectedSectionForMistakes.mistakeReasons && selectedSectionForMistakes.mistakeReasons.length > 0 && (
+                                            <div>
+                                                <div className="text-xs font-bold text-stone-500 mb-1.5">סיבות לטעויות:</div>
+                                                <div className="flex gap-1.5 flex-wrap">
+                                                    {selectedSectionForMistakes.mistakeReasons.map(r => (
+                                                        <span key={r} className="px-2.5 py-1 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold">
+                                                            {r === 'careless' ? '🤦‍♀️ חוסר תשומת לב' : r === 'time' ? '⏰ ניהול זמן' : r === 'gap' ? '❌ פער בחומר' : '🎲 ניחוש'}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                        {selectedSectionForMistakes.mistakeNote && (
+                                            <div className="p-3 bg-amber-50/60 rounded-2xl border border-amber-200 text-xs text-stone-700">
+                                                <div className="font-bold text-amber-900 mb-0.5">מסקנות מהתחקור:</div>
+                                                <div>{selectedSectionForMistakes.mistakeNote}</div>
+                                            </div>
+                                        )}
+                                        <button onClick={() => setSelectedSectionForMistakes(null)} className="w-full py-3 bg-stone-800 text-white rounded-2xl font-bold text-xs mt-3">
+                                            סגור תחקור
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+
             return (
                 <div className="min-h-screen flex flex-col md:flex-row pb-24 md:pb-0 no-print" dir="rtl">
                     
@@ -4707,6 +6089,16 @@ function App() {
                                     <h1 className="text-lg font-bold text-stone-800 leading-tight tracking-tight">StudyStreak</h1>
                                     <div className="flex items-center gap-1.5 mt-0.5">
                                         <span className="text-xs text-stone-500 font-medium">היי, {activeUserData.name}</span>
+                                        {(() => {
+                                            const champBadge = (activeUserData.badges || []).find(b => (typeof b === 'string' ? b === 'b_weekly_champ' : b?.id === 'b_weekly_champ'));
+                                            const champCount = champBadge?.count || (champBadge ? 1 : 0);
+                                            if (champCount <= 0) return null;
+                                            return (
+                                                <span className="text-[11px] bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-full font-black flex items-center gap-1 shadow-2xs" title={`אלופת השבוע ${champCount} פעמים`}>
+                                                    👑 {champCount > 1 ? `x${champCount}` : ''}
+                                                </span>
+                                            );
+                                        })()}
                                         <button 
                                             onClick={() => setIsSyncDiagnosticsOpen(true)}
                                             className={`text-[10px] px-2 py-0.5 rounded-full font-bold transition-all flex items-center gap-1 cursor-pointer ${
@@ -4779,6 +6171,16 @@ function App() {
                                        syncState === 'syncing' ? 'מסנכרן...' :
                                        syncState === 'offline' ? 'מקומי' : 'שגיאה'}</span>
                             </button>
+                            {(() => {
+                                const champBadge = (activeUserData.badges || []).find(b => (typeof b === 'string' ? b === 'b_weekly_champ' : b?.id === 'b_weekly_champ'));
+                                const champCount = champBadge?.count || (champBadge ? 1 : 0);
+                                if (champCount <= 0) return null;
+                                return (
+                                    <button onClick={() => setActiveTab('friends')} className="bg-amber-100 text-amber-900 border border-amber-300 px-2.5 py-1.5 rounded-xl text-xs font-black flex items-center gap-1 shadow-2xs active:scale-95" title={`אלופת השבוע ${champCount} פעמים - לחצי לצפייה בטבלה`}>
+                                        <span>👑</span> {champCount > 1 ? `x${champCount}` : ''}
+                                    </button>
+                                );
+                            })()}
                             <button onClick={()=>toggleModal('streakHistory', true)} className="bg-purple-50 text-purple-700 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95">
                                 <span>🔥</span> {activeUserData.taskStreak}
                             </button>
@@ -4792,8 +6194,64 @@ function App() {
 
                     <main className="flex-1 w-full max-w-5xl mx-auto p-4 md:p-6 lg:p-8 relative z-10">
                         
+                        {/* Mode Switcher Banner */}
+                        <div className="flex items-center justify-between flex-wrap gap-3 mb-6 bg-white/90 backdrop-blur-md p-2 rounded-3xl border border-stone-200/80 shadow-xs no-print">
+                            <div className="flex items-center gap-1.5 p-1 bg-stone-100/90 rounded-2xl w-full sm:w-auto">
+                                <button
+                                    onClick={() => { setStudyMode('school'); try { localStorage.setItem('studyStreak_mode', 'school'); } catch(e){} }}
+                                    className={`flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${
+                                        studyMode === 'school' ? 'bg-white text-purple-700 shadow-xs' : 'text-stone-500 hover:text-stone-800'
+                                    }`}>
+                                    <span>📚</span>
+                                    <span>לימודים ובגרויות</span>
+                                </button>
+                                <button
+                                    onClick={() => { setStudyMode('psychometry'); try { localStorage.setItem('studyStreak_mode', 'psychometry'); } catch(e){} }}
+                                    className={`flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${
+                                        studyMode === 'psychometry' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/20' : 'text-stone-500 hover:text-stone-800'
+                                    }`}>
+                                    <span>🎯</span>
+                                    <span>מצב פסיכומטרי</span>
+                                </button>
+                                <button
+                                    onClick={() => { setStudyMode('all'); try { localStorage.setItem('studyStreak_mode', 'all'); } catch(e){} }}
+                                    className={`flex-1 sm:flex-initial px-3 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center justify-center gap-1.5 active:scale-95 ${
+                                        studyMode === 'all' ? 'bg-white text-stone-800 shadow-xs' : 'text-stone-500 hover:text-stone-800'
+                                    }`}>
+                                    <span>🌐</span>
+                                    <span>הכל</span>
+                                </button>
+                            </div>
+                            {studyMode === 'psychometry' && (
+                                <div className="hidden sm:flex items-center gap-2 text-xs font-bold text-indigo-700 bg-indigo-50/80 px-3.5 py-2 rounded-2xl border border-indigo-100">
+                                    <span>⚡</span>
+                                    <span>פסיכומטרי דו-תחומי בלבד: כמותי + מילולי (החיבור 25% מהמילולי)</span>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Psychometry Section: In Psychometry Mode */}
+                        {studyMode === 'psychometry' && activeTab === 'dashboard' && (
+                            <PsychometrySection 
+                                activeUserData={activeUserData} 
+                                updateUserData={updateUserData} 
+                                showToast={showToast} 
+                            />
+                        )}
+
+                        {/* Psychometry Section: In All Mode */}
+                        {studyMode === 'all' && activeTab === 'dashboard' && (
+                            <div className="mb-8">
+                                <PsychometrySection 
+                                    activeUserData={activeUserData} 
+                                    updateUserData={updateUserData} 
+                                    showToast={showToast} 
+                                />
+                            </div>
+                        )}
+
                         {}
-                        {activeTab === 'dashboard' && (
+                        {activeTab === 'dashboard' && studyMode !== 'psychometry' && (
                             <div className="space-y-6 animate-[fadeIn_0.3s_ease-out]">
                                 <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                                     <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors group flex flex-col justify-between active:scale-95" onClick={() => toggleModal('streakHistory', true)}>
@@ -4809,21 +6267,54 @@ function App() {
                                         <div className="text-stone-400 text-xs font-semibold mb-2">נקודות השבוע</div>
                                         <div className="text-3xl font-bold text-purple-600 text-right" dir="ltr">{activeUserData.weeklyPoints}</div>
                                         {(() => {
-                                            const weekHours = (activeUserData.tasks || [])
-                                                .filter(t => {
-                                                    if (!t.completed || !t.studyDurationHours) return false;
-                                                    const d = t.completedAt ? new Date(t.completedAt) : (t.dueDate ? new Date(t.dueDate) : null);
-                                                    if (!d) return false;
-                                                    const sevenDaysAgo = new Date();
-                                                    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-                                                    return d >= sevenDaysAgo;
-                                                })
-                                                .reduce((sum, t) => sum + Number(t.studyDurationHours), 0);
-                                            return weekHours > 0 ? (
-                                                <div className="text-[11px] font-bold text-indigo-600 mt-1.5 flex items-center gap-1">
-                                                    <span>⏳</span> {parseFloat(weekHours.toFixed(1))} שעות למידה
-                                                </div>
-                                            ) : null;
+                                            const now = new Date();
+                                            const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                                            const sevenDaysAgo = new Date();
+                                            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                                            
+                                            let weekHours = 0;
+                                            let todayHours = 0;
+                                            
+                                            (activeUserData.tasks || []).forEach(t => {
+                                                if (!t.completed || !t.studyDurationHours) return;
+                                                const hours = Number(t.studyDurationHours);
+                                                if (isNaN(hours) || hours <= 0) return;
+                                                
+                                                let isToday = false;
+                                                let isWeek = false;
+                                                
+                                                if (t.completedAt) {
+                                                    const cd = new Date(t.completedAt);
+                                                    if (!isNaN(cd.getTime())) {
+                                                        if (cd >= sevenDaysAgo) isWeek = true;
+                                                        const cdStr = `${cd.getFullYear()}-${String(cd.getMonth() + 1).padStart(2, '0')}-${String(cd.getDate()).padStart(2, '0')}`;
+                                                        if (cdStr === todayStr) isToday = true;
+                                                    }
+                                                } else if (t.dueDate) {
+                                                    if (t.dueDate === todayStr) isToday = true;
+                                                    const dd = new Date(t.dueDate);
+                                                    if (!isNaN(dd.getTime()) && dd >= sevenDaysAgo) isWeek = true;
+                                                }
+                                                
+                                                if (isWeek) weekHours += hours;
+                                                if (isToday) todayHours += hours;
+                                            });
+                                            
+                                            if (weekHours > 0 || todayHours > 0) {
+                                                return (
+                                                    <div className="text-[11px] font-bold text-indigo-600 mt-1.5 flex flex-col gap-0.5">
+                                                        <div className="flex items-center gap-1">
+                                                            <span>⏳</span> {parseFloat(weekHours.toFixed(1))} שעות השבוע
+                                                        </div>
+                                                        {todayHours > 0 && (
+                                                            <div className="text-purple-600 font-extrabold flex items-center gap-1">
+                                                                <span>☀️</span> {parseFloat(todayHours.toFixed(1))} שע' היום!
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            }
+                                            return null;
                                         })()}
                                     </div>
                                     <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors active:scale-95" onClick={() => toggleModal('pointsHistory', true)}>
@@ -4885,6 +6376,20 @@ function App() {
                                                                         title="צפייה בצילומי לוח ודפי עבודה"
                                                                     >
                                                                         <span>📎</span> {task.attachments.length} קבצים
+                                                                    </button>
+                                                                )}
+                                                                {Boolean(task.notes || task.isExamPrep || task.examId || task.isFlexibleExamSession || (task.examId && (activeUserData.exams || []).find(e => e.id === task.examId)?.notes)) && (
+                                                                    <button 
+                                                                        type="button"
+                                                                        onClick={(e) => { e.stopPropagation(); handleOpenNotesTask(task); }}
+                                                                        className={`text-[10px] px-2 py-0.5 rounded-lg border flex items-center gap-1 shadow-2xs transition-colors cursor-pointer active:scale-95 ${
+                                                                            task.notes || (task.examId && (activeUserData.exams || []).find(e => e.id === task.examId)?.notes)
+                                                                                ? 'font-bold text-amber-800 bg-amber-100/90 hover:bg-amber-200 border-amber-300/70'
+                                                                                : 'font-semibold text-stone-600 bg-stone-100/90 hover:bg-amber-50 hover:text-amber-800 border-dashed border-stone-300 hover:border-amber-300'
+                                                                        }`}
+                                                                        title={task.notes ? 'צפייה ועריכת תכנון והערות למידה' : 'הוספת תכנון והערות למפגש למידה זה'}
+                                                                    >
+                                                                        <span>📝</span> {task.notes || (task.examId && (activeUserData.exams || []).find(e => e.id === task.examId)?.notes) ? 'הערות ותכנון' : '+ תכנון למידה'}
                                                                     </button>
                                                                 )}
                                                             </div>
@@ -5055,6 +6560,20 @@ function App() {
                                                                     title="צפייה בצילומי לוח ודפי עבודה"
                                                                 >
                                                                     <span>📎</span> {task.attachments.length} קבצים
+                                                                </button>
+                                                            )}
+                                                            {Boolean(task.notes || task.isExamPrep || task.examId || task.isFlexibleExamSession || (task.examId && (activeUserData.exams || []).find(e => e.id === task.examId)?.notes)) && (
+                                                                <button 
+                                                                    type="button"
+                                                                    onClick={(e) => { e.stopPropagation(); handleOpenNotesTask(task); }} 
+                                                                    className={`text-xs px-2.5 py-1 rounded-lg border flex items-center gap-1 shadow-2xs transition-colors cursor-pointer active:scale-95 ${
+                                                                        task.notes || (task.examId && (activeUserData.exams || []).find(e => e.id === task.examId)?.notes)
+                                                                            ? 'font-bold text-amber-800 bg-amber-100/90 hover:bg-amber-200 border-amber-300/70'
+                                                                            : 'font-semibold text-stone-600 bg-stone-100/90 hover:bg-amber-50 hover:text-amber-800 border-dashed border-stone-300 hover:border-amber-300'
+                                                                    }`}
+                                                                    title={task.notes ? 'צפייה ועריכת תכנון והערות למידה' : 'הוספת תכנון והערות למפגש למידה זה'}
+                                                                >
+                                                                    <span>📝</span> {task.notes || (task.examId && (activeUserData.exams || []).find(e => e.id === task.examId)?.notes) ? 'הערות ותכנון' : '+ תכנון למידה'}
                                                                 </button>
                                                             )}
                                                         </div>
@@ -5317,11 +6836,18 @@ function App() {
                                                         className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-semibold outline-none focus:border-emerald-500 focus:bg-white transition-all text-right"
                                                     />
                                                 </div>
-                                                <button 
-                                                    onClick={() => handleSendWhatsAppTest('student')}
-                                                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-4 py-3 rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1 shrink-0 self-end sm:self-center">
-                                                    <span>⚡</span> שליחת בדיקה למספר שלי
-                                                </button>
+                                                <div className="flex items-center gap-2 flex-wrap shrink-0 self-end sm:self-center">
+                                                    <button 
+                                                        onClick={() => handleSendWhatsAppTest('student')}
+                                                        className="bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-200 px-3 py-3 rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1">
+                                                        <span>⚡</span> בדיקת מספר
+                                                    </button>
+                                                    <button 
+                                                        onClick={() => handleSendWhatsAppStudyReminder(true)}
+                                                        className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-3 rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1.5 shadow-sm">
+                                                        <span>🔔</span> שליחת תזכורת למידה עכשיו
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
 
@@ -5391,7 +6917,7 @@ function App() {
                                                 />
                                                 <div className="text-xs text-stone-700">
                                                     <span className="font-bold block">שליחה אוטומטית של דוח שבועי בכל מוצאי שבת 🗓️</span>
-                                                    <span className="text-stone-500">המערכת תסכם אוטומטית את כל המשימות, שעות הלמידה וההתמדה ותשלח הודעה אחת מרוכזת להורים בימי שבת בערב.</span>
+                                                    <span className="text-stone-500">המערכת תסכם אוטומטית את כל המשימות, שעות הלמידה וההתמדה ותשלח לשני ההורים בימי שבת בערב.</span>
                                                 </div>
                                             </label>
                                         </div>
@@ -6173,6 +7699,26 @@ function App() {
 
                             const isTaskInFilter = (t) => {
                                 if (analyticsTimeFilter === 'all') return true;
+                                if (analyticsTimeFilter === 'today') {
+                                    const now = new Date();
+                                    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                                    if (t.completedAt) {
+                                        const cd = new Date(t.completedAt);
+                                        if (!isNaN(cd.getTime())) {
+                                            const cdStr = `${cd.getFullYear()}-${String(cd.getMonth() + 1).padStart(2, '0')}-${String(cd.getDate()).padStart(2, '0')}`;
+                                            return cdStr === todayStr;
+                                        }
+                                    }
+                                    if (t.dueDate) return t.dueDate === todayStr;
+                                    if (t.createdAt) {
+                                        const cd = new Date(t.createdAt);
+                                        if (!isNaN(cd.getTime())) {
+                                            const cdStr = `${cd.getFullYear()}-${String(cd.getMonth() + 1).padStart(2, '0')}-${String(cd.getDate()).padStart(2, '0')}`;
+                                            return cdStr === todayStr;
+                                        }
+                                    }
+                                    return false;
+                                }
                                 const taskDate = getTaskDate(t);
                                 if (!taskDate || isNaN(taskDate.getTime())) return false;
                                 if (analyticsTimeFilter === 'last7') {
@@ -6192,6 +7738,11 @@ function App() {
                             const isExamInFilter = (ex) => {
                                 if (analyticsTimeFilter === 'all') return true;
                                 if (!ex.date) return false;
+                                if (analyticsTimeFilter === 'today') {
+                                    const now = new Date();
+                                    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                                    return ex.date === todayStr;
+                                }
                                 const exDate = new Date(ex.date);
                                 if (!exDate || isNaN(exDate.getTime())) return false;
                                 if (analyticsTimeFilter === 'last7') {
@@ -6275,11 +7826,13 @@ function App() {
 
                             const currentFilterLabel = analyticsTimeFilter === 'all' 
                                 ? 'כל הזמנים 🌟' 
-                                : analyticsTimeFilter === 'last7'
-                                    ? 'השבוע (7 ימים אחרונים) 🗓️'
-                                    : analyticsTimeFilter === 'last30' 
-                                        ? '30 ימים אחרונים ⏱️' 
-                                        : `חודש ${formatMonthLabel(analyticsTimeFilter)} 📅`;
+                                : analyticsTimeFilter === 'today'
+                                    ? 'היום (יום נוכחי) ☀️'
+                                    : analyticsTimeFilter === 'last7'
+                                        ? 'השבוע (7 ימים אחרונים) 🗓️'
+                                        : analyticsTimeFilter === 'last30' 
+                                            ? '30 ימים אחרונים ⏱️' 
+                                            : `חודש ${formatMonthLabel(analyticsTimeFilter)} 📅`;
 
                             return (
                                 <div className="space-y-6 max-w-5xl mx-auto animate-[fadeIn_0.3s_ease-out]">
@@ -6316,13 +7869,13 @@ function App() {
                                         <div className="flex items-center gap-2 flex-wrap">
                                             <span className="text-xs font-bold text-stone-500 ml-1">סינון לפי תקופה:</span>
                                             <button 
-                                                onClick={() => setAnalyticsTimeFilter('all')}
+                                                onClick={() => setAnalyticsTimeFilter('today')}
                                                 className={`px-3.5 py-1.5 rounded-2xl text-xs md:text-sm font-bold transition-all active:scale-95 ${
-                                                    analyticsTimeFilter === 'all' 
+                                                    analyticsTimeFilter === 'today' 
                                                         ? 'bg-purple-600 text-white shadow-sm shadow-purple-200' 
                                                         : 'bg-stone-100 hover:bg-stone-200 text-stone-700'
                                                 }`}>
-                                                הכל (כל הזמנים) 🌟
+                                                היום ☀️
                                             </button>
                                             <button 
                                                 onClick={() => setAnalyticsTimeFilter('last7')}
@@ -6341,6 +7894,15 @@ function App() {
                                                         : 'bg-stone-100 hover:bg-stone-200 text-stone-700'
                                                 }`}>
                                                 חודש אחרון (30 ימים) ⏱️
+                                            </button>
+                                            <button 
+                                                onClick={() => setAnalyticsTimeFilter('all')}
+                                                className={`px-3.5 py-1.5 rounded-2xl text-xs md:text-sm font-bold transition-all active:scale-95 ${
+                                                    analyticsTimeFilter === 'all' 
+                                                        ? 'bg-purple-600 text-white shadow-sm shadow-purple-200' 
+                                                        : 'bg-stone-100 hover:bg-stone-200 text-stone-700'
+                                                }`}>
+                                                הכל (כל הזמנים) 🌟
                                             </button>
                                             <div className="relative inline-flex items-center">
                                                 <select 
@@ -6544,6 +8106,18 @@ function App() {
                                                                                     {examCountdown.text}
                                                                                 </span>
                                                                             )}
+                                                                            <button 
+                                                                                type="button"
+                                                                                onClick={(e) => { e.stopPropagation(); handleOpenNotesExam(ex); }}
+                                                                                className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border flex items-center gap-1 shadow-2xs transition-all cursor-pointer active:scale-95 ${
+                                                                                    ex.notes 
+                                                                                        ? 'text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border-indigo-200' 
+                                                                                        : 'text-stone-500 bg-stone-100/70 hover:bg-stone-200/70 border-stone-200'
+                                                                                }`}
+                                                                                title={ex.notes ? "צפייה בחומר למבחן ומיקוד" : "הוספת חומר למבחן ומיקוד"}
+                                                                            >
+                                                                                <span>📖</span> {ex.notes ? 'חומר למבחן' : '+ חומר למבחן'}
+                                                                            </button>
                                                                         </div>
                                                                         <div className="text-xs text-stone-400 mt-0.5" dir="ltr">
                                                                             {new Date(ex.date).toLocaleDateString('he-IL')}
@@ -6833,7 +8407,14 @@ function App() {
                                                 return (
                                                     <div key={badge.id} className={`p-4 rounded-2xl border text-center transition-all ${earned ? 'bg-gradient-to-b from-amber-50 to-orange-50 border-amber-200 shadow-sm' : 'bg-stone-50 border-stone-200 opacity-60 grayscale'}`}>
                                                         <div className="text-3xl mb-2 drop-shadow-sm">{badge.icon}</div>
-                                                        <div className={`text-sm font-bold ${earned ? 'text-amber-800' : 'text-stone-500'}`}>{badge.title}</div>
+                                                        <div className={`text-sm font-bold flex items-center justify-center gap-1.5 flex-wrap ${earned ? 'text-amber-800' : 'text-stone-500'}`}>
+                                                            <span>{badge.title}</span>
+                                                            {earned && earned.count > 1 && (
+                                                                <span className="text-[10px] bg-amber-200 text-amber-950 px-1.5 py-0.5 rounded-full font-black border border-amber-300">
+                                                                    x{earned.count}
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                         <div className="text-[10px] mt-1 text-stone-500 leading-tight">{badge.description}</div>
                                                     </div>
                                                 );
@@ -7185,6 +8766,19 @@ function App() {
                                     <div>
                                         <label className="text-xs font-bold text-stone-500 block mb-1 uppercase">מה צריך לעשות?</label>
                                         <input name="title" defaultValue={editingTask.title || ''} required className="w-full p-3 bg-white border border-stone-200 rounded-2xl text-sm" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-stone-500 block mb-1 uppercase flex items-center justify-between">
+                                            <span>הערות ותכנון למידה</span>
+                                            <span className="text-[10px] text-stone-400 font-normal">צפייה בלחיצה על כפתור</span>
+                                        </label>
+                                        <textarea 
+                                            name="notes" 
+                                            rows="2" 
+                                            defaultValue={editingTask.notes || ''} 
+                                            placeholder="הערות אישיות, תכנון למידה, עמודים בספר..." 
+                                            className="w-full p-3 bg-white border border-stone-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-400 resize-none font-medium"
+                                        />
                                     </div>
                                     <div className="grid grid-cols-2 gap-3">
                                         <div>
@@ -7706,6 +9300,15 @@ function App() {
                                             <input type="time" name="time" className="w-full p-4 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-indigo-400 font-bold" />
                                         </div>
                                     </div>
+                                    <div>
+                                        <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase">חומר למבחן / מיקוד והערות (אופציונלי)</label>
+                                        <textarea 
+                                            name="notes" 
+                                            rows="2"
+                                            placeholder="למשל: פרקים 1-4, דגש על שאלות חזרה ומושגי יסוד..." 
+                                            className="w-full p-3 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-indigo-400 font-medium resize-none transition-all"
+                                        />
+                                    </div>
                                     <button type="submit" className="w-full bg-indigo-600 text-white py-4 mt-2 rounded-xl text-sm font-bold shadow-md hover:bg-indigo-700 transition-all active:scale-95">שמירת המבחן</button>
                                 </form>
                             </div>
@@ -7850,6 +9453,43 @@ function App() {
                                         </div>
                                     </div>
 
+                                    {(() => {
+                                        const selectedEx = (activeUserData.exams || []).find(x => x.id === singleExamSessionData.examId);
+                                        if (!selectedEx || !selectedEx.notes) return null;
+                                        return (
+                                            <div className="p-3 bg-indigo-50/70 rounded-xl border border-indigo-100 text-xs">
+                                                <div className="flex items-center justify-between font-bold text-indigo-900 mb-1">
+                                                    <span className="flex items-center gap-1"><span>🎯</span> חומר המבחן שהוגדר:</span>
+                                                    <button 
+                                                        type="button" 
+                                                        onClick={() => setSingleExamSessionData(prev => ({ 
+                                                            ...prev, 
+                                                            notes: prev.notes ? `${prev.notes}\n${selectedEx.notes}` : selectedEx.notes 
+                                                        }))}
+                                                        className="text-[11px] text-indigo-700 hover:text-indigo-900 underline font-semibold cursor-pointer active:scale-95"
+                                                    >
+                                                        + העתק לתכנון הסשן
+                                                    </button>
+                                                </div>
+                                                <p className="text-stone-700 whitespace-pre-wrap line-clamp-3">{selectedEx.notes}</p>
+                                            </div>
+                                        );
+                                    })()}
+
+                                    <div>
+                                        <label className="text-xs font-bold mb-1.5 block text-stone-500 uppercase flex items-center justify-between">
+                                            <span>תכנון למידה והערות לסשן (אופציונלי)</span>
+                                            <span className="text-[10px] text-stone-400 font-normal">צפייה בלחיצה על כפתור</span>
+                                        </label>
+                                        <textarea 
+                                            rows="2"
+                                            value={singleExamSessionData.notes || ''}
+                                            onChange={(e) => setSingleExamSessionData(prev => ({ ...prev, notes: e.target.value }))}
+                                            placeholder="מה התכנון למפגש הזה? למשל: עמודים 30-45, מעבר על סיכום פרק 2, לפתור שאלות מבגרות..." 
+                                            className="w-full p-3 border border-stone-200 rounded-xl text-sm outline-none bg-stone-50 focus:bg-white focus:border-amber-400 font-medium transition-all resize-none"
+                                        />
+                                    </div>
+
                                     {/* Flexible Time Info Notice */}
                                     <div className="p-3.5 bg-stone-50 rounded-2xl border border-stone-200/80 flex items-center gap-3">
                                         <div className="w-9 h-9 rounded-xl bg-white border border-stone-200 flex items-center justify-center text-base shrink-0 shadow-2xs">
@@ -7921,7 +9561,8 @@ function App() {
                                                         subjectId: exam.subjectId,
                                                         examName: exam.examName || '',
                                                         date: exam.date,
-                                                        time: exam.time || ''
+                                                        time: exam.time || '',
+                                                        notes: exam.notes || ''
                                                     });
                                                 }}
                                                 className="w-full p-4 bg-white border border-indigo-200 rounded-2xl text-sm outline-none font-bold focus:border-indigo-400 transition-all cursor-pointer"
@@ -7987,6 +9628,17 @@ function App() {
                                                     className="w-full p-4 bg-white border border-stone-200 rounded-2xl text-sm outline-none font-medium focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all shadow-sm" 
                                                 />
                                             </div>
+                                        </div>
+
+                                        <div>
+                                            <label className="text-xs font-bold text-stone-500 block mb-1.5 uppercase tracking-wide">חומר למבחן / מיקוד והערות (אופציונלי)</label>
+                                            <textarea 
+                                                rows="2"
+                                                value={examPlannerData.notes || ''} 
+                                                onChange={e => setExamPlannerData({...examPlannerData, notes: e.target.value})} 
+                                                placeholder="למשל: פרקים 1-4, דגש על שאלות חזרה ומושגי יסוד..."
+                                                className="w-full p-3.5 bg-white border border-stone-200 rounded-2xl text-sm outline-none font-medium focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all shadow-sm resize-none" 
+                                            />
                                         </div>
 
 
@@ -8219,7 +9871,24 @@ function App() {
                                                 <div className="text-3xl font-black text-purple-600 drop-shadow-sm" dir="ltr">{activeUserData.taskStreak}</div>
                                             </div>
                                             <div className="text-xs font-bold text-purple-600/70 mb-3 relative z-10" dir="ltr">
-                                                התחיל ב: {new Date(activeUserData.currentStreakStart).toLocaleDateString('he-IL')}
+                                                {(() => {
+                                                    const rawStart = activeUserData.currentStreakStart;
+                                                    let d = rawStart ? new Date(rawStart) : null;
+                                                    if (!d || isNaN(d.getTime()) || d.getFullYear() < 2020) {
+                                                        const completed = (activeUserData.tasks || [])
+                                                            .filter(t => t.completed && !t.givenUp && !t.isLessonLog)
+                                                            .sort((a,b) => new Date(a.completedAt || a.createdAt) - new Date(b.completedAt || b.createdAt));
+                                                        const targetIdx = Math.max(0, completed.length - (activeUserData.taskStreak || 1));
+                                                        if (completed[targetIdx]) {
+                                                            const fallbackDate = completed[targetIdx].completedAt || completed[targetIdx].createdAt;
+                                                            if (fallbackDate) d = new Date(fallbackDate);
+                                                        }
+                                                    }
+                                                    if (d && !isNaN(d.getTime()) && d.getFullYear() >= 2020) {
+                                                        return `התחיל ב: ${d.toLocaleDateString('he-IL')}`;
+                                                    }
+                                                    return null;
+                                                })()}
                                             </div>
                                             {activeUserData.currentStreakEmojis && activeUserData.currentStreakEmojis.length > 0 && (
                                                 <div className="bg-white/60 p-2 rounded-xl text-sm flex flex-wrap gap-1.5 border border-purple-100/50 relative z-10">
@@ -8687,6 +10356,21 @@ function App() {
                                         )}
                                         <button 
                                             onClick={() => {
+                                                handleOpenNotesTask(task);
+                                                setTaskActionsMenu(null);
+                                            }}
+                                            className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-amber-50/70 hover:bg-amber-100 text-amber-900 border border-amber-200 transition-all font-bold text-sm active:scale-98">
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xl">📝</span>
+                                                <span>{task.notes ? 'צפייה ועריכת תכנון והערות' : 'הוספת תכנון והערות לסשן'}</span>
+                                            </div>
+                                            <span className="text-amber-700 bg-amber-100 px-2.5 py-0.5 rounded-md text-[11px] font-bold">
+                                                {task.notes ? 'הערות קיימות' : '+ הוספה'}
+                                            </span>
+                                        </button>
+
+                                        <button 
+                                            onClick={() => {
                                                 setEditingTask(task);
                                                 toggleModal('edit', true);
                                                 setTaskActionsMenu(null);
@@ -8896,6 +10580,21 @@ function App() {
                                             </div>
                                             <span className="text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded-md text-[11px] font-bold">
                                                 {exam.grade ? `נוכחי: ${exam.grade}` : 'תיעוד הישג'}
+                                            </span>
+                                        </button>
+
+                                        <button 
+                                            onClick={() => {
+                                                handleOpenNotesExam(exam);
+                                                setExamActionsMenu(null);
+                                            }}
+                                            className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-indigo-50/70 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 transition-all font-bold text-sm active:scale-98">
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xl">📖</span>
+                                                <span>{exam.notes ? 'צפייה ועריכת חומר למבחן' : 'הגדרת חומר ומיקוד למבחן'}</span>
+                                            </div>
+                                            <span className="text-indigo-700 bg-indigo-100/70 px-2 py-0.5 rounded-md text-[11px] font-bold">
+                                                {exam.notes ? 'חומר שמור' : '+ הגדרה'}
                                             </span>
                                         </button>
 
@@ -9291,6 +10990,413 @@ function App() {
                         );
                     })()}
 
+                    {crowningCelebrationModal && (
+                        <div className="fixed inset-0 z-[85] flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs animate-[fadeIn_0.2s_ease-out]" dir="rtl">
+                            <div className="bg-gradient-to-b from-amber-50 via-white to-orange-50/50 rounded-3xl p-6 sm:p-8 w-full max-w-md shadow-2xl border-2 border-amber-300 text-center relative overflow-hidden animate-[scaleUp_0.25s_ease-out]">
+                                <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-amber-300 via-yellow-400 to-amber-300"></div>
+                                
+                                <div className="text-6xl mb-3 drop-shadow-md animate-bounce">
+                                    👑
+                                </div>
+                                
+                                <span className="text-xs font-black uppercase tracking-wider bg-amber-200 text-amber-900 px-3.5 py-1 rounded-full border border-amber-300 inline-block mb-3 shadow-2xs">
+                                    {crowningCelebrationModal.isNewWin ? 'הכתרת אלופת השבוע! 👑' : 'עדכון כתרי אלופת השבוע! 👑'}
+                                </span>
+                                
+                                <h2 className="text-2xl font-black text-stone-900 mb-2">
+                                    כל הכבוד, {crowningCelebrationModal.winnerName}! 🎉
+                                </h2>
+                                
+                                <p className="text-sm text-stone-600 leading-relaxed mb-6">
+                                    {crowningCelebrationModal.isNewWin ? (
+                                        <>הובלת את טבלת הלמידה השבועית עם <strong className="text-amber-800">{crowningCelebrationModal.points} נקודות</strong> וזכית בכתר אלופת השבוע!</>
+                                    ) : (
+                                        <>הכתרים שלך חושבו מחדש לפי כל השבועות בהם ניצחת במקום הראשון! כל שבוע של השקעה והתמדה נספר במלואו.</>
+                                    )}
+                                </p>
+                                
+                                <div className="bg-white/95 border border-amber-200 rounded-2xl p-4 mb-6 shadow-sm flex items-center justify-center gap-3.5">
+                                    <span className="text-4xl">👑</span>
+                                    <div className="text-right">
+                                        <div className="text-xs text-stone-500 font-medium">סך כל הכתרים שלך:</div>
+                                        <div className="text-xl font-black text-amber-900">{crowningCelebrationModal.crownCount} כתרים של אלופת השבוע</div>
+                                    </div>
+                                </div>
+                                
+                                <button
+                                    type="button"
+                                    onClick={() => setCrowningCelebrationModal(null)}
+                                    className="w-full py-3.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-2xl font-black text-base shadow-lg shadow-amber-500/25 active:scale-95 transition-all cursor-pointer"
+                                >
+                                    יאללה להמשיך להפציץ! 🚀
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {viewingNotesTask && (() => {
+                        const task = viewingNotesTask;
+                        const sub = (activeUserData.subjects || []).find(s => s.id === task.subjectId);
+                        const parentExam = task.examId ? (activeUserData.exams || []).find(e => e.id === task.examId) : null;
+                        const hasExamMaterial = Boolean(parentExam?.notes);
+
+                        return (
+                            <div className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs animate-[fadeIn_0.15s_ease-out]" dir="rtl">
+                                <div className="bg-white rounded-3xl p-5 sm:p-6 w-full max-w-lg shadow-2xl border border-stone-200 animate-[scaleUp_0.15s_ease-out] relative max-h-[90vh] overflow-y-auto custom-scrollbar">
+                                    {/* Modal Header */}
+                                    <div className="flex justify-between items-start mb-4 pb-3 border-b border-stone-100">
+                                        <div className="flex-1 pr-1">
+                                            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                                                <span className="text-xs font-bold px-2.5 py-0.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-200/60 flex items-center gap-1">
+                                                    <span>📝</span> תכנון והערות למידה
+                                                </span>
+                                                {sub && (
+                                                    <span className="text-xs font-bold px-2 py-0.5 rounded-lg bg-stone-100 text-stone-700">
+                                                        {sub.emoji} {sub.name}
+                                                    </span>
+                                                )}
+                                                {task.sessionNumber && (
+                                                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg bg-indigo-50 text-indigo-700">
+                                                        סשן {task.sessionNumber}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <h3 className="font-bold text-lg text-stone-800 leading-snug">
+                                                {task.title}
+                                            </h3>
+                                        </div>
+                                        <button 
+                                            onClick={() => setViewingNotesTask(null)} 
+                                            className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full active:scale-95 transition-colors">
+                                            <IconX className="w-4 h-4"/>
+                                        </button>
+                                    </div>
+
+                                    {/* Exam Material Context Box */}
+                                    {parentExam && (
+                                        <div className="mb-4 bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4">
+                                            <div className="flex items-center justify-between mb-1.5">
+                                                <div className="flex items-center gap-1.5 font-bold text-xs text-indigo-950">
+                                                    <span>🎯</span>
+                                                    <span>חומר ומיקוד למבחן: {parentExam.examName || 'מבחן'}</span>
+                                                </div>
+                                                {hasExamMaterial && isEditingNotesModal && (
+                                                    <button 
+                                                        type="button" 
+                                                        onClick={() => setNotesModalDraft(prev => prev ? `${prev}\n${parentExam.notes}` : parentExam.notes)}
+                                                        className="text-[11px] font-bold text-indigo-700 hover:text-indigo-900 bg-indigo-100/80 px-2 py-0.5 rounded-md transition-colors active:scale-95"
+                                                    >
+                                                        + העתק לתכנון הסשן
+                                                    </button>
+                                                )}
+                                            </div>
+                                            {hasExamMaterial ? (
+                                                <div className="text-xs sm:text-sm text-stone-700 font-medium whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto custom-scrollbar bg-white/70 p-3 rounded-xl border border-indigo-100/60">
+                                                    {parentExam.notes}
+                                                </div>
+                                            ) : (
+                                                <div className="text-xs text-stone-500 flex items-center justify-between">
+                                                    <span>לא הוגדר עדיין חומר כללי למבחן זה.</span>
+                                                    <button 
+                                                        type="button" 
+                                                        onClick={() => {
+                                                            setViewingNotesTask(null);
+                                                            handleOpenNotesExam(parentExam);
+                                                        }}
+                                                        className="text-xs font-bold text-indigo-600 hover:underline"
+                                                    >
+                                                        הגדרת חומר למבחן ←
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* Session-specific notes section */}
+                                    <div className="space-y-2 mb-4">
+                                        <div className="flex items-center justify-between">
+                                            <label className="text-xs font-bold text-stone-600 uppercase tracking-wide flex items-center gap-1.5">
+                                                <span>📌</span>
+                                                תכנון והערות לסשן זה
+                                            </label>
+                                            {!isEditingNotesModal && (
+                                                <button 
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setNotesModalDraft(task.notes || '');
+                                                        setIsEditingNotesModal(true);
+                                                    }}
+                                                    className="text-xs font-bold text-amber-800 hover:text-amber-950 bg-amber-100/80 hover:bg-amber-200/80 px-2.5 py-1 rounded-xl transition-all active:scale-95"
+                                                >
+                                                    ✏️ עריכה
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {isEditingNotesModal ? (
+                                            <div className="space-y-2">
+                                                <textarea 
+                                                    autoFocus
+                                                    rows="4"
+                                                    value={notesModalDraft}
+                                                    onChange={(e) => setNotesModalDraft(e.target.value)}
+                                                    placeholder="מה התכנון למפגש הזה? (למשל: תרגול עמודים 40-45, מעבר על סיכום פרק 2...)"
+                                                    className="w-full p-3.5 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium outline-none focus:bg-white focus:border-amber-400 focus:ring-2 focus:ring-amber-200 transition-all resize-none leading-relaxed"
+                                                />
+                                                <div className="flex gap-2">
+                                                    <button 
+                                                        type="button"
+                                                        onClick={() => handleSaveTaskNotes(task.id, notesModalDraft)}
+                                                        className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-bold text-xs shadow-xs transition-colors active:scale-95"
+                                                    >
+                                                        💾 שמירת שינויים
+                                                    </button>
+                                                    <button 
+                                                        type="button"
+                                                        onClick={() => setIsEditingNotesModal(false)}
+                                                        className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-xl font-bold text-xs transition-colors active:scale-95"
+                                                    >
+                                                        ביטול
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div>
+                                                {task.notes ? (
+                                                    <div className="p-4 bg-amber-50/50 border border-amber-200/60 rounded-2xl text-xs sm:text-sm text-stone-800 font-medium whitespace-pre-wrap leading-relaxed shadow-2xs">
+                                                        {task.notes}
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-center py-6 px-4 bg-stone-50 rounded-2xl border border-dashed border-stone-200 text-stone-400 text-xs">
+                                                        <div className="text-2xl mb-1">📝</div>
+                                                        <p className="font-semibold text-stone-600 mb-2">עדיין לא נרשם תכנון ספציפי לסשן זה</p>
+                                                        <button 
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setNotesModalDraft('');
+                                                                setIsEditingNotesModal(true);
+                                                            }}
+                                                            className="text-xs font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-xl transition-all active:scale-95"
+                                                        >
+                                                            + הוספת תכנון לסשן
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Task attachments preview if present */}
+                                    {task.attachments && task.attachments.length > 0 && (
+                                        <div className="mb-4 pt-3 border-t border-stone-100">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-xs font-bold text-stone-500 flex items-center gap-1.5">
+                                                    <span>📎</span> קבצים מצורפים ({task.attachments.length})
+                                                </span>
+                                                <button 
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setViewingNotesTask(null);
+                                                        openAttachmentViewer(task);
+                                                    }}
+                                                    className="text-xs font-bold text-purple-700 hover:underline"
+                                                >
+                                                    צפייה בקבצים ←
+                                                </button>
+                                            </div>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {task.attachments.map((att, idx) => (
+                                                    <span key={idx} className="text-[11px] font-medium bg-purple-50 text-purple-800 border border-purple-200 px-2 py-0.5 rounded-lg truncate max-w-[200px]">
+                                                        {att.name || `קובץ ${idx + 1}`}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Close button */}
+                                    <div className="pt-2">
+                                        <button 
+                                            type="button"
+                                            onClick={() => setViewingNotesTask(null)}
+                                            className="w-full py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-2xl font-bold text-sm transition-colors active:scale-95"
+                                        >
+                                            סגירה
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+                    {viewingNotesExam && (() => {
+                        const exam = viewingNotesExam;
+                        const sub = (activeUserData.subjects || []).find(s => s.id === exam.subjectId);
+                        const examTasks = (activeUserData.tasks || []).filter(t => t.examId === exam.id && !t.givenUp);
+                        const completedSessions = examTasks.filter(t => t.completed || t.completedAt).length;
+
+                        return (
+                            <div className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs animate-[fadeIn_0.15s_ease-out]" dir="rtl">
+                                <div className="bg-white rounded-3xl p-5 sm:p-6 w-full max-w-lg shadow-2xl border border-stone-200 animate-[scaleUp_0.15s_ease-out] relative max-h-[90vh] overflow-y-auto custom-scrollbar">
+                                    {/* Header */}
+                                    <div className="flex justify-between items-start mb-4 pb-3 border-b border-stone-100">
+                                        <div className="flex-1 pr-1">
+                                            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                                                <span className="text-xs font-bold px-2.5 py-0.5 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200/60 flex items-center gap-1">
+                                                    <span>📖</span> חומר ומיקוד למבחן
+                                                </span>
+                                                {sub && (
+                                                    <span className="text-xs font-bold px-2 py-0.5 rounded-lg bg-stone-100 text-stone-700">
+                                                        {sub.emoji} {sub.name}
+                                                    </span>
+                                                )}
+                                                {exam.date && (
+                                                    <span className="text-xs text-stone-500 font-semibold" dir="ltr">
+                                                        📅 {new Date(exam.date).toLocaleDateString('he-IL')}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <h3 className="font-bold text-lg text-stone-800 leading-snug">
+                                                {exam.examName || 'מבחן'} ב{sub?.name || 'כללי'}
+                                            </h3>
+                                        </div>
+                                        <button 
+                                            onClick={() => setViewingNotesExam(null)} 
+                                            className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full active:scale-95 transition-colors">
+                                            <IconX className="w-4 h-4"/>
+                                        </button>
+                                    </div>
+
+                                    {/* Exam Material Section */}
+                                    <div className="space-y-2 mb-5">
+                                        <div className="flex items-center justify-between">
+                                            <label className="text-xs font-bold text-stone-600 uppercase tracking-wide flex items-center gap-1.5">
+                                                <span>🎯</span>
+                                                חומר הבחינה, סילבוס והערות
+                                            </label>
+                                            {!isEditingNotesModal && (
+                                                <button 
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setNotesModalDraft(exam.notes || '');
+                                                        setIsEditingNotesModal(true);
+                                                    }}
+                                                    className="text-xs font-bold text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-xl transition-all active:scale-95"
+                                                >
+                                                    ✏️ עריכה
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {isEditingNotesModal ? (
+                                            <div className="space-y-2">
+                                                <textarea 
+                                                    autoFocus
+                                                    rows="5"
+                                                    value={notesModalDraft}
+                                                    onChange={(e) => setNotesModalDraft(e.target.value)}
+                                                    placeholder="רשמי כאן את כל חומר המבחן, עמודים בספר, פרקים, שאלות לדוגמה, דגשים מיוחדים..."
+                                                    className="w-full p-3.5 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium outline-none focus:bg-white focus:border-indigo-400 focus:ring-2 focus:ring-indigo-200 transition-all resize-none leading-relaxed"
+                                                />
+                                                <div className="flex gap-2">
+                                                    <button 
+                                                        type="button"
+                                                        onClick={() => handleSaveExamNotes(exam.id, notesModalDraft)}
+                                                        className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs shadow-xs transition-colors active:scale-95"
+                                                    >
+                                                        💾 שמירת חומר הבחינה
+                                                    </button>
+                                                    <button 
+                                                        type="button"
+                                                        onClick={() => setIsEditingNotesModal(false)}
+                                                        className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-xl font-bold text-xs transition-colors active:scale-95"
+                                                    >
+                                                        ביטול
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div>
+                                                {exam.notes ? (
+                                                    <div className="p-4 bg-indigo-50/50 border border-indigo-200/60 rounded-2xl text-xs sm:text-sm text-stone-800 font-medium whitespace-pre-wrap leading-relaxed shadow-2xs">
+                                                        {exam.notes}
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-center py-6 px-4 bg-stone-50 rounded-2xl border border-dashed border-stone-200 text-stone-400 text-xs">
+                                                        <div className="text-2xl mb-1">📖</div>
+                                                        <p className="font-semibold text-stone-600 mb-2">עדיין לא הוגדר חומר או מיקוד למבחן זה</p>
+                                                        <button 
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setNotesModalDraft('');
+                                                                setIsEditingNotesModal(true);
+                                                            }}
+                                                            className="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-xl transition-all active:scale-95 border border-indigo-200"
+                                                        >
+                                                            + הגדרת חומר למבחן
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Associated Study Sessions summary */}
+                                    <div className="pt-3 border-t border-stone-100 mb-4">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <span className="text-xs font-bold text-stone-600 flex items-center gap-1.5">
+                                                <span>⚡</span> מפגשי למידה למבחן ({completedSessions}/{examTasks.length})
+                                            </span>
+                                            <button 
+                                                type="button"
+                                                onClick={() => {
+                                                    setViewingNotesExam(null);
+                                                    handleOpenSingleSessionModal(exam);
+                                                }}
+                                                className="text-xs font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 px-2 py-0.5 rounded-lg border border-amber-200 active:scale-95 transition-colors"
+                                            >
+                                                + סשן למידה נוסף
+                                            </button>
+                                        </div>
+                                        {examTasks.length > 0 ? (
+                                            <div className="space-y-1.5 max-h-36 overflow-y-auto custom-scrollbar">
+                                                {examTasks.map(t => (
+                                                    <div key={t.id} className="p-2.5 bg-stone-50 rounded-xl border border-stone-100 flex items-center justify-between text-xs">
+                                                        <div className="flex items-center gap-2 truncate">
+                                                            <span className={t.completed ? 'text-emerald-600' : 'text-stone-400'}>
+                                                                {t.completed ? '✅' : '⏳'}
+                                                            </span>
+                                                            <span className={`font-semibold truncate ${t.completed ? 'line-through text-stone-400' : 'text-stone-700'}`}>
+                                                                {t.title}
+                                                            </span>
+                                                            {t.notes && <span title="יש הערות ספציפיות לסשן">📝</span>}
+                                                        </div>
+                                                        <span className="text-[11px] text-stone-400 shrink-0" dir="ltr">
+                                                            {t.dueDate ? new Date(t.dueDate).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' }) : ''}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <p className="text-xs text-stone-400 italic">טרם נוצרו מפגשי למידה למבחן זה.</p>
+                                        )}
+                                    </div>
+
+                                    {/* Close button */}
+                                    <div className="pt-2">
+                                        <button 
+                                            type="button"
+                                            onClick={() => setViewingNotesExam(null)}
+                                            className="w-full py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-2xl font-bold text-sm transition-colors active:scale-95"
+                                        >
+                                            סגירה
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+
                     {examPrintModal && (
                         <div className="fixed inset-0 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-[fadeIn_0.2s_ease-out]"
                              onClick={() => !isPreparingPrint && setExamPrintModal(null)}>
@@ -9576,6 +11682,17 @@ function App() {
                                                 className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all"
                                             />
                                         </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-stone-600 mb-1.5">חומר למבחן / מיקוד והערות</label>
+                                        <textarea
+                                            rows="3"
+                                            value={editingExam.notes || ''}
+                                            onChange={(e) => setEditingExam({ ...editingExam, notes: e.target.value })}
+                                            placeholder="פירוט נושאי הבחינה, עמודים בספר, דגשים מיוחדים..."
+                                            className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all resize-none"
+                                        />
                                     </div>
 
                                     {(() => {

@@ -20,8 +20,8 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
                 .toLowerCase();
         };
 
-        const getNextSaturday22PM = (fromDate) => {
-            const now = fromDate ? (fromDate instanceof Date ? fromDate : new Date(fromDate)) : new Date();
+        const getNextSaturday22PM = () => {
+            const now = new Date();
             const d = now.getDay(); // 0 = Sun, ..., 6 = Sat
             const target = new Date(now);
             if (d === 6) {
@@ -59,58 +59,6 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
 
         const getNextSaturdayNight = getNextSaturday22PM;
         const getLastSaturdayNight = getLastSaturday22PM;
-
-        const calculateWeeklyPointsFromActivity = (user, weekStart, weekEnd = Date.now()) => {
-            if (!user) return 0;
-            let sum = 0;
-            const tasks = Array.isArray(user.tasks) ? user.tasks : [];
-            const hist = Array.isArray(user.pointsHistory) ? user.pointsHistory : [];
-
-            tasks.forEach(t => {
-                if (t && t.completed && t.completedAt) {
-                    const tTime = new Date(t.completedAt).getTime();
-                    if (!isNaN(tTime) && tTime >= weekStart && tTime <= weekEnd) {
-                        sum += Math.max(0, t.pointsEarned !== undefined ? t.pointsEarned : 1);
-                    }
-                }
-            });
-
-            hist.forEach(h => {
-                if (h && h.date && !h.canceled && !h.taskId && (h.points || 0) > 0) {
-                    const hTime = new Date(h.date).getTime();
-                    if (!isNaN(hTime) && hTime >= weekStart && hTime <= weekEnd) {
-                        sum += h.points;
-                    }
-                }
-            });
-
-            return sum;
-        };
-
-        const calculateMaxHistoricalWeeklyPoints = (user) => {
-            if (!user) return 0;
-            const tasks = Array.isArray(user.tasks) ? user.tasks : [];
-            const weekBuckets = {};
-
-            tasks.forEach(t => {
-                if (t && t.completed && t.completedAt) {
-                    const tTime = new Date(t.completedAt).getTime();
-                    if (!isNaN(tTime)) {
-                        const endSat = getNextSaturday22PM(new Date(tTime));
-                        weekBuckets[endSat] = (weekBuckets[endSat] || 0) + Math.max(0, t.pointsEarned !== undefined ? t.pointsEarned : 1);
-                    }
-                }
-            });
-
-            let maxPts = Number(user.highestWeeklyPoints) || 0;
-            Object.values(weekBuckets).forEach(pts => {
-                if (pts > maxPts) maxPts = pts;
-            });
-            if (Number(user.weeklyPoints || 0) > maxPts) {
-                maxPts = Number(user.weeklyPoints);
-            }
-            return maxPts;
-        };
 
 
         const timeToMins = (t) => {
@@ -684,6 +632,41 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             return { updatedTasks, updatedCount };
         };
 
+        const calculateTaskExpectedPoints = (task) => {
+            if (!task) return 1;
+            if (typeof task.rewardPoints === 'number' && task.rewardPoints > 0) {
+                return task.rewardPoints;
+            }
+            if (task.isFlexibleExamSession) {
+                return 3;
+            }
+
+            const createdAt = task.createdAt ? new Date(task.createdAt) : null;
+            let dueDate = null;
+            if (task.dueDate && task.dueTime) {
+                dueDate = new Date(`${task.dueDate}T${task.dueTime}`);
+            } else if (task.dueDate) {
+                dueDate = new Date(`${task.dueDate}T23:59:59`);
+            }
+
+            let isEarly = false;
+            const completionTime = task.completedAt ? new Date(task.completedAt) : null;
+            if (dueDate && createdAt && !isNaN(dueDate.getTime()) && !isNaN(createdAt.getTime()) && completionTime && !isNaN(completionTime.getTime())) {
+                const totalDurationMs = dueDate.getTime() - createdAt.getTime();
+                const usedDurationMs = completionTime.getTime() - createdAt.getTime();
+                // Early if completed in first half of available duration or >= 24h before due
+                if (usedDurationMs <= Math.max(totalDurationMs / 2, 86400000) && completionTime.getTime() <= (dueDate.getTime() + 5 * 60 * 1000)) {
+                    isEarly = true;
+                }
+            }
+
+            let points = isEarly ? 2 : 1;
+            if (task.isExamPrep) {
+                points += 1;
+            }
+            return points;
+        };
+
         const formatPastExamDate = (examDateStr) => {
             if (!examDateStr) return '';
             try {
@@ -703,3 +686,11 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
                 return examDateStr;
             }
         };
+
+        if (typeof module !== 'undefined' && module.exports) {
+            module.exports = {
+                calculateTaskExpectedPoints,
+                formatPastExamDate,
+                syncExamStudyTasks
+            };
+        }
