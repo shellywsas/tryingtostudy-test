@@ -1,7 +1,7 @@
 /**
  * StudyStreak Pro - Service Worker for Background Notifications & PWA
  */
-const CACHE_NAME = 'studystreak-v20261029_practice';
+const CACHE_NAME = 'studystreak-v20261030_v8';
  
 self.addEventListener('install', (event) => {
     self.skipWaiting();
@@ -111,4 +111,11 @@ self.addEventListener('message', (event) => {
             console.log('Cancelled scheduled reminders for task:', taskId);
         }
     }
+});
+
+// Required by Google Chrome Android for WebAPK installation
+self.addEventListener('fetch', (event) => {
+    event.respondWith(
+        fetch(event.request).catch(() => caches.match(event.request))
+    );
 });

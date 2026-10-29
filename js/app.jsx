@@ -124,6 +124,13 @@ function App() {
                             tasks: userToUpload.tasks.filter(t => t && !delSet.has(t.id))
                         };
                     }
+                    if (Array.isArray(userToUpload.deletedExamIds) && userToUpload.deletedExamIds.length > 0 && Array.isArray(userToUpload.exams)) {
+                        const delExamSet = new Set(userToUpload.deletedExamIds);
+                        userToUpload = {
+                            ...userToUpload,
+                            exams: userToUpload.exams.filter(e => e && !delExamSet.has(e.id))
+                        };
+                    }
                     const cleanData = sanitizeForFirestore(userToUpload);
                     await db.collection("users").doc(targetUser).set(cleanData, { merge: true });
                     if (typeof clearPendingSync === 'function') {
@@ -490,17 +497,28 @@ function App() {
             useEffect(() => {
                 if (!activeUserData || !globalState.activeUser) return;
                 const now = new Date().getTime();
-                const currentWeekStart = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
-                
-                // 1. Regular weekly reset on Saturday 22:00 (or on first load after Saturday 22:00)
-                if (now > (activeUserData.nextWeeklyReset || 0)) {
-                    const completedWeekEnd = activeUserData.nextWeeklyReset && activeUserData.nextWeeklyReset > 0 
-                        ? activeUserData.nextWeeklyReset 
-                        : currentWeekStart;
+                const lastSat22 = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
+                const nextSat22 = typeof getNextSaturday22PM === 'function' ? getNextSaturday22PM(now) : (now + (7 * 86400000));
+                const nextSatMidnight = typeof getNextSaturdayMidnight === 'function' ? getNextSaturdayMidnight(now) : (lastSat22 + (2 * 3600000));
+
+                // Ensure nextWeeklyCrowning and nextWeeklyReset are initialized/aligned
+                const targetCrowning = activeUserData.nextWeeklyCrowning || activeUserData.nextWeeklyReset || lastSat22;
+                let targetReset = activeUserData.nextWeeklyReset || nextSatMidnight;
+                // Migrate legacy 22:00 reset timestamp to 00:00 (2 hours later) so reset happens at midnight
+                if (targetReset && new Date(targetReset).getHours() === 22) {
+                    targetReset = targetReset + (2 * 3600000);
+                }
+
+                // PHASE 1: At Saturday 22:00 -> Crown the Weekly Champion (WITHOUT resetting points yet!)
+                if (now >= targetCrowning && (activeUserData.lastCrownedWeekEnd || 0) < targetCrowning) {
+                    const completedWeekEnd = targetCrowning <= now ? targetCrowning : lastSat22;
                     const completedWeekStart = completedWeekEnd - (7 * 86400000);
 
+                    // Points earned after 22:00 belong to the next week, so exclude them from the 22:00 crowning comparison
+                    const pointsAfter22 = now > completedWeekEnd ? calculatePointsInWindow(activeUserData, completedWeekEnd, now) : 0;
+                    const currentPointsUpTo22 = Math.max(0, (activeUserData.weeklyPoints || 0) - pointsAfter22);
                     const userHistoricalPts = calculatePointsInWindow(activeUserData, completedWeekStart, completedWeekEnd);
-                    const userWeeklyPts = Math.max(activeUserData.weeklyPoints || 0, activeUserData.lastWeekPoints || 0, userHistoricalPts);
+                    const userWeeklyPts = Math.max(currentPointsUpTo22, userHistoricalPts);
 
                     const friendsArr = Object.values(liveFriends || {});
                     let isTop = userWeeklyPts > 0;
@@ -508,8 +526,10 @@ function App() {
                     let topFriendPts = 0;
 
                     friendsArr.forEach(f => {
+                        const fAfter22 = now > completedWeekEnd ? calculatePointsInWindow(f, completedWeekEnd, now) : 0;
+                        const fCurrentUpTo22 = Math.max(0, (f.weeklyPoints || 0) - fAfter22);
                         const fHistPts = calculatePointsInWindow(f, completedWeekStart, completedWeekEnd);
-                        const fPts = Math.max(f.weeklyPoints || 0, f.lastWeekPoints || 0, fHistPts);
+                        const fPts = Math.max(fCurrentUpTo22, f.crownedWeekPoints || 0, fHistPts);
                         if (fPts > userWeeklyPts) {
                             isTop = false;
                             if (fPts > topFriendPts) {
@@ -541,7 +561,7 @@ function App() {
                                 earnedAt: new Date().toISOString()
                             });
                         }
-                        showToast(`👑 מזל טוב! הוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! זכית בכתר שבועי נוסף! 👑`, 'success');
+                        showToast(`👑 מזל טוב! השעה 22:00 והוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! (הנקודות יתאפסו ב-00:00) 👑`, 'success');
                         setCrowningCelebrationModal({
                             winnerName: activeUserData.name || 'אלופה',
                             points: userWeeklyPts,
@@ -549,25 +569,46 @@ function App() {
                             isNewWin: true
                         });
                     } else if (topFriendName && topFriendPts > 0) {
-                        showToast(`סיום שבוע! אלופת השבוע החולף היא ${topFriendName} עם ${topFriendPts} נק' 👑`, 'info');
+                        showToast(`הכתרת אלופת השבוע (22:00)! אלופת השבוע היא ${topFriendName} עם ${topFriendPts} נק' 👑 (איפוס הנקודות ב-00:00)`, 'info');
                     }
 
-                    // Calculate points earned *after* the reset timestamp for the new week
-                    const newWeekPoints = calculatePointsInWindow(activeUserData, completedWeekEnd, now);
+                    const midnightAfterCrowning = completedWeekEnd + (2 * 3600000);
+                    // If it's already past 00:00 as well, reset points accrued up to 22:00 immediately
+                    const isAlsoPastMidnight = now >= midnightAfterCrowning;
+                    const newWeekPointsAfter22 = calculatePointsInWindow(activeUserData, completedWeekEnd, now);
 
                     updateUserData(prev => ({
                         ...prev,
                         highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, userWeeklyPts),
                         lastWeekPoints: userWeeklyPts,
-                        weeklyPoints: newWeekPoints,
-                        nextWeeklyReset: getNextSaturday22PM(),
+                        crownedWeekPoints: userWeeklyPts,
+                        lastCrownedWeekEnd: completedWeekEnd,
+                        nextWeeklyCrowning: nextSat22,
+                        weeklyPoints: isAlsoPastMidnight ? newWeekPointsAfter22 : prev.weeklyPoints,
+                        nextWeeklyReset: isAlsoPastMidnight ? nextSatMidnight : midnightAfterCrowning,
                         badges: wonCrown ? updatedBadges : (prev.badges || [])
                     }));
                     return;
                 }
 
-                // 2. Retroactive healing of missing crowns:
-                // If user had weeks where they were weekly champion in the past, ensure crown count reflects all won weeks!
+                // PHASE 2: At Saturday 00:00 (Midnight) -> Reset the points that occurred up to 22:00 that week
+                if (now >= targetReset) {
+                    const cutoff22PM = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (targetReset - (2 * 3600000));
+                    // Keep only points earned after Saturday 22:00 for the new week
+                    const pointsEarnedSince22PM = calculatePointsInWindow(activeUserData, cutoff22PM, now);
+
+                    updateUserData(prev => ({
+                        ...prev,
+                        highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, prev.weeklyPoints || 0),
+                        lastWeekPoints: prev.crownedWeekPoints || prev.weeklyPoints || 0,
+                        weeklyPoints: pointsEarnedSince22PM,
+                        nextWeeklyCrowning: nextSat22,
+                        nextWeeklyReset: nextSatMidnight
+                    }));
+                    return;
+                }
+
+                // 3. Retroactive healing of missing crowns:
                 const totalPastWins = evaluateHistoricalWeeklyWins(activeUserData, liveFriends);
                 const currentBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : { ...b }));
                 const champBadgeIdx = currentBadges.findIndex(b => b.id === 'b_weekly_champ');
@@ -600,7 +641,7 @@ function App() {
                         isNewWin: false
                     });
                 }
-            }, [globalState.activeUser, activeUserData?.nextWeeklyReset, activeUserData?.weeklyPoints, Object.keys(liveFriends || {}).length]);
+            }, [globalState.activeUser, activeUserData?.nextWeeklyCrowning, activeUserData?.nextWeeklyReset, activeUserData?.weeklyPoints]);
 
 
             useEffect(() => {
@@ -1361,11 +1402,6 @@ function App() {
 
 
             const [activeTab, setActiveTab] = useState('dashboard');
-            const [studyMode, setStudyMode] = useState(() => {
-                try {
-                    return localStorage.getItem('studyStreak_mode') || 'psychometry';
-                } catch(e) { return 'psychometry'; }
-            });
             const [toastMessage, setToastMessage] = useState(null);
             const [printMode, setPrintMode] = useState(false);
             const [printType, setPrintType] = useState(null);
@@ -1384,6 +1420,7 @@ function App() {
                 examGrade: false, quickExam: false, edit: false, reminderMode: false, notificationHelp: false,
                 singleExamSession: false
             });
+            const [pointsHistoryFilter, setPointsHistoryFilter] = useState('all'); // 'weekly' | 'all'
 
 
             const [activeTask, setActiveTask] = useState(null);
@@ -1416,6 +1453,151 @@ function App() {
             const [isEditingNotesModal, setIsEditingNotesModal] = useState(false);
             const [notesModalDraft, setNotesModalDraft] = useState('');
             const [crowningCelebrationModal, setCrowningCelebrationModal] = useState(null);
+            const [expandedExamIds, setExpandedExamIds] = useState({});
+            const toggleExamExpand = (examId) => setExpandedExamIds(prev => ({ ...prev, [examId]: !prev[examId] }));
+
+            // Mobile Hardware/Browser Back Button Support (Single step back instead of exiting the app)
+            const isHandlingPopState = useRef(false);
+            const hasOpenOverlay = Boolean(
+                viewingAttachment ||
+                crowningCelebrationModal ||
+                viewingNotesTask ||
+                viewingNotesExam ||
+                examPrintModal ||
+                editingExam ||
+                isSyncDiagnosticsOpen ||
+                taskActionsMenu ||
+                examActionsMenu ||
+                isMoreMenuOpen ||
+                printMode ||
+                Object.values(modals).some(Boolean)
+            );
+            const canGoBackInApp = Boolean(globalState.activeUser && (hasOpenOverlay || activeTab !== 'dashboard'));
+            const backStateRef = useRef({});
+            backStateRef.current = {
+                viewingAttachment,
+                crowningCelebrationModal,
+                viewingNotesTask,
+                viewingNotesExam,
+                isEditingNotesModal,
+                examPrintModal,
+                isPreparingPrint,
+                editingExam,
+                isSyncDiagnosticsOpen,
+                taskActionsMenu,
+                examActionsMenu,
+                isMoreMenuOpen,
+                printMode,
+                modals,
+                activeTab
+            };
+
+            useEffect(() => {
+                if (typeof window === 'undefined') return;
+                if (isHandlingPopState.current) {
+                    isHandlingPopState.current = false;
+                    return;
+                }
+                if (canGoBackInApp) {
+                    if (!window.history.state || !window.history.state.studyStreakGuard) {
+                        try {
+                            window.history.pushState({ studyStreakGuard: true }, '');
+                        } catch (e) {}
+                    }
+                }
+            }, [canGoBackInApp, activeTab, hasOpenOverlay]);
+
+            useEffect(() => {
+                if (typeof window === 'undefined') return;
+                const handlePopState = () => {
+                    const st = backStateRef.current;
+                    let handled = false;
+
+                    if (st.viewingAttachment) {
+                        setViewingAttachment(null);
+                        handled = true;
+                    } else if (st.crowningCelebrationModal) {
+                        setCrowningCelebrationModal(null);
+                        handled = true;
+                    } else if (st.viewingNotesTask) {
+                        if (st.isEditingNotesModal) setIsEditingNotesModal(false);
+                        else setViewingNotesTask(null);
+                        handled = true;
+                    } else if (st.viewingNotesExam) {
+                        if (st.isEditingNotesModal) setIsEditingNotesModal(false);
+                        else setViewingNotesExam(null);
+                        handled = true;
+                    } else if (st.examPrintModal && !st.isPreparingPrint) {
+                        setExamPrintModal(null);
+                        handled = true;
+                    } else if (st.editingExam) {
+                        setEditingExam(null);
+                        handled = true;
+                    } else if (st.isSyncDiagnosticsOpen) {
+                        setIsSyncDiagnosticsOpen(false);
+                        handled = true;
+                    } else if (st.taskActionsMenu) {
+                        setTaskActionsMenu(null);
+                        handled = true;
+                    } else if (st.examActionsMenu) {
+                        setExamActionsMenu(null);
+                        handled = true;
+                    } else if (st.isMoreMenuOpen) {
+                        setIsMoreMenuOpen(false);
+                        handled = true;
+
+                    } else if (st.printMode) {
+                        setPrintMode(false);
+                        setPrintType(null);
+                        handled = true;
+                    } else if (st.modals && Object.values(st.modals).some(Boolean)) {
+                        const openModalKey = Object.keys(st.modals).find(k => st.modals[k]);
+                        if (openModalKey) {
+                            setModals(m => ({ ...m, [openModalKey]: false }));
+                            if (openModalKey === 'task') setTaskFormAttachments([]);
+                            if (openModalKey === 'edit') setEditingTask(null);
+                            if (openModalKey === 'complete') setActiveTask(null);
+                            if (openModalKey === 'giveUp') setTaskToGiveUp(null);
+                            if (openModalKey === 'cancelExam') setTaskToCancel(null);
+                            if (openModalKey === 'examGrade') setActiveExamForGrade(null);
+                            handled = true;
+                        }
+                    } else if (st.activeTab && st.activeTab !== 'dashboard') {
+                        setActiveTab('dashboard');
+                        handled = true;
+                    }
+
+                    if (handled) {
+                        isHandlingPopState.current = true;
+                        setTimeout(() => {
+                            const nextSt = backStateRef.current;
+                            const stillHasOverlay = Boolean(
+                                nextSt.viewingAttachment ||
+                                nextSt.crowningCelebrationModal ||
+                                nextSt.viewingNotesTask ||
+                                nextSt.viewingNotesExam ||
+                                nextSt.examPrintModal ||
+                                nextSt.editingExam ||
+                                nextSt.isSyncDiagnosticsOpen ||
+                                nextSt.taskActionsMenu ||
+                                nextSt.examActionsMenu ||
+                                nextSt.isMoreMenuOpen ||
+                                nextSt.printMode ||
+                                (nextSt.modals && Object.values(nextSt.modals).some(Boolean))
+                            );
+                            if (stillHasOverlay || (nextSt.activeTab && nextSt.activeTab !== 'dashboard')) {
+                                try {
+                                    window.history.pushState({ studyStreakGuard: true }, '');
+                                } catch (e) {}
+                            }
+                            isHandlingPopState.current = false;
+                        }, 50);
+                    }
+                };
+
+                window.addEventListener('popstate', handlePopState);
+                return () => window.removeEventListener('popstate', handlePopState);
+            }, []);
 
             useEffect(() => {
                 if (editingTask) {
@@ -1592,6 +1774,7 @@ function App() {
             const [practiceDoneNow, setPracticeDoneNow] = useState(true);
             const [practiceDurationMins, setPracticeDurationMins] = useState(45);
             const [practiceUnderstanding, setPracticeUnderstanding] = useState(5);
+            const [showPastTopics, setShowPastTopics] = useState(false);
             const [taskGivenDate, setTaskGivenDate] = useState(() => new Date().toISOString().split('T')[0]);
             const [lateReason, setLateReason] = useState('');
             const [otherLateReason, setOtherLateReason] = useState('');
@@ -1691,6 +1874,123 @@ function App() {
             const [adminPointsInput, setAdminPointsInput] = useState('');
             const [adminWeeklyPointsInput, setAdminWeeklyPointsInput] = useState('');
 
+            // User Feedback / Bug Report Box State
+            const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
+            const [feedbackType, setFeedbackType] = useState('bug'); // 'bug' | 'request' | 'comment'
+            const [feedbackMessage, setFeedbackMessage] = useState('');
+            const [feedbackGuestName, setFeedbackGuestName] = useState('');
+            const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+
+            const recordAdminAuditLog = async (actionTitle, category, targetUser, detailsText, extraMeta = {}) => {
+                try {
+                    const entry = {
+                        id: 'alog_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+                        timestamp: new Date().toISOString(),
+                        actionTitle: actionTitle || 'פעולת אדמין',
+                        category: category || 'general',
+                        targetUsername: typeof targetUser === 'string' ? targetUser : (targetUser?.username || ''),
+                        targetDisplayName: typeof targetUser === 'string' ? targetUser : (targetUser?.name || targetUser?.username || ''),
+                        details: detailsText || '',
+                        adminActor: 'אדמין ראשי',
+                        ...extraMeta
+                    };
+
+                    let localLogs = [];
+                    try {
+                        const raw = localStorage.getItem('studyStreak_system_admin_logs');
+                        if (raw) localLogs = JSON.parse(raw) || [];
+                    } catch (e) {}
+                    const nextLocal = [entry, ...localLogs.filter(x => x && x.id !== entry.id)].slice(0, 500);
+                    try {
+                        localStorage.setItem('studyStreak_system_admin_logs', JSON.stringify(nextLocal));
+                    } catch (e) {}
+
+                    if (db) {
+                        const docRef = db.collection('task_attachments').doc('__system_admin_logs__');
+                        const snap = await docRef.get();
+                        const remoteItems = (snap.exists && Array.isArray(snap.data()?.items)) ? snap.data().items : [];
+                        const byId = new Map();
+                        [...remoteItems, ...nextLocal].forEach(item => {
+                            if (item && item.id) byId.set(item.id, item);
+                        });
+                        const merged = Array.from(byId.values())
+                            .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
+                            .slice(0, 500);
+                        await docRef.set({
+                            items: merged,
+                            updatedAt: Date.now(),
+                            docType: 'system_admin_logs'
+                        }, { merge: true });
+                    }
+                } catch (err) {
+                    console.warn('Could not record admin audit log:', err);
+                }
+            };
+
+            const handleSendUserFeedback = async (e) => {
+                if (e && e.preventDefault) e.preventDefault();
+                const cleanMsg = (feedbackMessage || '').trim();
+                if (!cleanMsg) {
+                    showToast('נא לכתוב את תוכן ההודעה לפני השליחה ✍️', 'warning');
+                    return;
+                }
+                setIsSubmittingFeedback(true);
+                try {
+                    const senderUsername = globalState?.activeUser || '';
+                    const senderName = activeUserData?.name || (feedbackGuestName || '').trim() || senderUsername || 'משתמשת';
+                    const newReport = {
+                        id: 'fb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+                        timestamp: new Date().toISOString(),
+                        type: feedbackType || 'bug',
+                        message: cleanMsg,
+                        senderName,
+                        senderUsername,
+                        status: 'open',
+                        adminNote: ''
+                    };
+
+                    let localReports = [];
+                    try {
+                        const raw = localStorage.getItem('studyStreak_system_feedback');
+                        if (raw) localReports = JSON.parse(raw) || [];
+                    } catch (err) {}
+                    const nextLocal = [newReport, ...localReports.filter(x => x && x.id !== newReport.id)].slice(0, 500);
+                    try {
+                        localStorage.setItem('studyStreak_system_feedback', JSON.stringify(nextLocal));
+                    } catch (err) {}
+
+                    if (db) {
+                        const docRef = db.collection('task_attachments').doc('__system_feedback__');
+                        const snap = await docRef.get();
+                        const remoteItems = (snap.exists && Array.isArray(snap.data()?.items)) ? snap.data().items : [];
+                        const byId = new Map();
+                        [...remoteItems, ...nextLocal].forEach(item => {
+                            if (item && item.id) byId.set(item.id, item);
+                        });
+                        const merged = Array.from(byId.values())
+                            .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
+                            .slice(0, 500);
+                        await docRef.set({
+                            items: merged,
+                            updatedAt: Date.now(),
+                            docType: 'system_feedback'
+                        }, { merge: true });
+                    }
+
+                    setFeedbackMessage('');
+                    setFeedbackGuestName('');
+                    setIsFeedbackModalOpen(false);
+                    showToast('הפנייה שלך נשלחה ונשמרה במסמך הדיווחים! תודה רבה 💜', 'success');
+                } catch (err) {
+                    console.error('Error submitting feedback:', err);
+                    setFeedbackMessage('');
+                    setIsFeedbackModalOpen(false);
+                    showToast('ההודעה נשמרה במכשיר ותסונכרן אוטומטית! 💜', 'info');
+                } finally {
+                    setIsSubmittingFeedback(false);
+                }
+            };
+
             const loadAdminUsers = async () => {
                 setAdminLoading(true);
                 try {
@@ -1770,13 +2070,17 @@ function App() {
                 if (!user || !badgeId) return;
                 let currentBadges = Array.isArray(user.badges) ? [...user.badges] : [];
                 const idx = currentBadges.findIndex(b => (typeof b === 'string' ? b === badgeId : b?.id === badgeId));
+                const badgeObj = (typeof ALL_BADGES !== 'undefined' ? ALL_BADGES : []).find(b => b.id === badgeId);
+                const badgeLabel = badgeObj ? `${badgeObj.icon || '🏅'} ${badgeObj.title}` : badgeId;
                 let newBadges;
                 if (idx !== -1) {
                     newBadges = currentBadges.filter((_, i) => i !== idx);
                     showToast(`התג הוסר מחשבונה של @${user.username}`, 'info');
+                    recordAdminAuditLog('הסרת תג הישג', 'badge', user, `הוסר התג "${badgeLabel}" מחשבונה של ${user.name} (@${user.username}).`);
                 } else {
                     newBadges = [...currentBadges, { id: badgeId, earnedAt: new Date().toISOString() }];
                     showToast(`התג הוענק בהצלחה ל-@${user.username}! 🏅`, 'success');
+                    recordAdminAuditLog('הענקת תג הישג', 'badge', user, `הוענק התג "${badgeLabel}" לחשבונה של ${user.name} (@${user.username}).`);
                 }
                 saveAdminUserUpdate(user.username, { badges: newBadges });
             };
@@ -1784,6 +2088,7 @@ function App() {
             const adminDeleteUser = async (username) => {
                 if (!username) return;
                 try {
+                    const deletedUserObj = adminUsersList.find(u => u.username === username) || deleteConfirmUser || { username, name: username };
                     if (db) {
                         await db.collection("users").doc(username).delete();
                     }
@@ -1800,6 +2105,12 @@ function App() {
                     setDeleteConfirmUser(null);
                     setDeleteConfirmStep(0);
                     if (selectedAdminUser?.username === username) setSelectedAdminUser(null);
+                    recordAdminAuditLog(
+                        'מחיקת חשבון לצמיתות',
+                        'delete_user',
+                        deletedUserObj,
+                        `החשבון של ${deletedUserObj.name || username} (@${username}) נמחק לצמיתות ממסד הנתונים (סה"כ נקודות שהיו: ${deletedUserObj.totalPoints || 0}, רצף: ${deletedUserObj.taskStreak || 0} 🔥).`
+                    );
                     showToast(`החשבון של @${username} נמחק בהצלחה לצמיתות 🗑️`, 'info');
                 } catch(err) {
                     console.error("Error deleting user:", err);
@@ -1885,11 +2196,18 @@ function App() {
                     longestStreak: newLongestStreak,
                     streakHistory: newStreakHistory
                 });
+                recordAdminAuditLog(
+                    'ביטול קנס והחזרת נקודות',
+                    'penalty',
+                    user,
+                    `בוטל קנס עבור "${targetTask?.title || penaltyLog.taskTitle || penaltyLog.details || 'משימה'}" והוענקו +${refund} נק' (סה"כ נקודות: ${user.totalPoints || 0} ← ${newTotal} | נקודות השבוע: ${user.weeklyPoints || 0} ← ${newWeekly} | רצף: ${user.taskStreak || 0} ← ${newTaskStreak} 🔥)`
+                );
                 showToast(`הקנס בוטל והוענקו נקודות הגשה (+${refund} נק' סה"כ) לחשבון! 💚`, 'success');
             };
 
             const adminRestoreStreak = (user, streakItem) => {
                 if (!user || !streakItem) return;
+                const oldStreak = user.taskStreak || 0;
                 const restoredLen = streakItem.length || 1;
                 const newStreakHistory = (user.streakHistory || []).filter(s => s.id !== streakItem.id);
                 saveAdminUserUpdate(user.username, {
@@ -1897,6 +2215,12 @@ function App() {
                     longestStreak: Math.max(user.longestStreak || 0, restoredLen),
                     streakHistory: newStreakHistory
                 });
+                recordAdminAuditLog(
+                    'שחזור רצף שנשבר',
+                    'streak',
+                    user,
+                    `שוחזר רצף היסטורי של ${restoredLen} משימות 🔥 (רצף קודם: ${oldStreak} ← רצף חדש: ${restoredLen})`
+                );
                 showToast(`הרצף שוחזר בהצלחה ל-${restoredLen} 🔥`, 'success');
             };
 
@@ -1906,32 +2230,57 @@ function App() {
                     showToast('נא להזין מספר רצף תקין', 'warning');
                     return;
                 }
+                const oldStreak = user.taskStreak || 0;
                 saveAdminUserUpdate(user.username, {
                     taskStreak: val,
                     longestStreak: Math.max(user.longestStreak || 0, val)
                 });
+                recordAdminAuditLog(
+                    'עדכון רצף (סטריק) ידני',
+                    'streak',
+                    user,
+                    `רצף המשימות שונה ידנית מ-${oldStreak} 🔥 ל-${val} 🔥`
+                );
             };
 
             const adminSetCustomPoints = (user, totalPts, weeklyPts) => {
                 const t = parseInt(totalPts, 10);
                 const w = parseInt(weeklyPts, 10);
+                const oldTotal = user.totalPoints || 0;
+                const oldWeekly = user.weeklyPoints || 0;
+                const newTotal = isNaN(t) ? oldTotal : t;
+                const newWeekly = isNaN(w) ? oldWeekly : w;
                 saveAdminUserUpdate(user.username, {
-                    totalPoints: isNaN(t) ? (user.totalPoints || 0) : t,
-                    weeklyPoints: isNaN(w) ? (user.weeklyPoints || 0) : w
+                    totalPoints: newTotal,
+                    weeklyPoints: newWeekly
                 });
+                recordAdminAuditLog(
+                    'עדכון נקודות ידני',
+                    'points',
+                    user,
+                    `עדכון נקודות ידני: סה"כ נקודות שונה מ-${oldTotal} ל-${newTotal} | נקודות השבוע שונה מ-${oldWeekly} ל-${newWeekly}`
+                );
             };
 
             const adminDeleteTask = (user, taskId) => {
+                const targetTask = (user.tasks || []).find(t => t.id === taskId);
                 const newTasks = (user.tasks || []).filter(t => t.id !== taskId);
                 const deletedTaskIds = Array.from(new Set([...(user.deletedTaskIds || []), taskId]));
                 saveAdminUserUpdate(user.username, { tasks: newTasks, deletedTaskIds });
+                recordAdminAuditLog(
+                    'מחיקת משימה',
+                    'task',
+                    user,
+                    `נמחקה המשימה "${targetTask?.title || taskId}"${targetTask?.dueDate ? ` (תאריך הגשה: ${targetTask.dueDate})` : ''}`
+                );
                 showToast('המשימה נמחקה בהצלחה', 'info');
             };
 
             const adminToggleTask = (user, taskId) => {
+                const targetTask = (user.tasks || []).find(t => t.id === taskId);
+                const nowDone = !(targetTask?.completed);
                 const newTasks = (user.tasks || []).map(t => {
                     if (t.id === taskId) {
-                        const nowDone = !t.completed;
                         return {
                             ...t,
                             completed: nowDone,
@@ -1942,6 +2291,12 @@ function App() {
                     return t;
                 });
                 saveAdminUserUpdate(user.username, { tasks: newTasks });
+                recordAdminAuditLog(
+                    'שינוי סטטוס משימה',
+                    'task',
+                    user,
+                    `המשימה "${targetTask?.title || taskId}" סומנה ידנית כ-${nowDone ? 'הושלמה ✅' : 'לא הושלמה ⏳'}`
+                );
             };
 
             const adminResetTaskPenalty = (user, taskId) => {
@@ -2023,6 +2378,12 @@ function App() {
                     longestStreak: newLongestStreak,
                     streakHistory: newStreakHistory
                 });
+                recordAdminAuditLog(
+                    'ביטול קנס משימה',
+                    'penalty',
+                    user,
+                    `בוטל קנס המשימה "${targetTask?.title || taskId}" והוענקו +${refund} נק' (סה"כ נקודות: ${user.totalPoints || 0} ← ${newTotal} | רצף: ${user.taskStreak || 0} ← ${newTaskStreak} 🔥)`
+                );
                 showToast(`בוטל קנס המשימה והוענקו נקודות הגשה (+${refund} נק' סה"כ) לחשבון! 💚`, 'success');
             };
 
@@ -2110,7 +2471,7 @@ function App() {
                 const actualType = typeof currentFormType === 'boolean' ? (currentFormType ? 'hw' : 'log') : currentFormType;
 
                 if (actualType === 'practice') {
-                    const topic = taskData.lessonTopic || taskData.title || '';
+                    const topic = (taskData.lessonTopic || '').trim();
                     const title = taskData.title ? (taskData.title.startsWith('תרגול') ? taskData.title : `תרגול: ${taskData.title}`) : (topic ? `תרגול: ${topic}` : 'סשן תרגול עצמאי');
                     
                     if (practiceOpts.doneNow) {
@@ -2251,8 +2612,9 @@ function App() {
                     const cleanedStr = String(directInput).replace(',', '.').trim();
                     const val = parseFloat(cleanedStr);
                     if (isNaN(val) || val <= 0) return null;
-                    const totalMinutes = Math.round(val * 60);
+                    const totalMinutes = Math.round(val);
                     if (totalMinutes <= 0) return null;
+                    const hoursExact = parseFloat((totalMinutes / 60).toFixed(2));
                     const hours = Math.floor(totalMinutes / 60);
                     const mins = totalMinutes % 60;
                     let formattedStr = '';
@@ -2264,7 +2626,7 @@ function App() {
                         formattedStr = `${mins} דקות`;
                     }
                     return {
-                        studyDurationHours: parseFloat(val.toFixed(2)),
+                        studyDurationHours: hoursExact,
                         studyDurationMinutes: totalMinutes,
                         studyTimeRange: formattedStr,
                         studyTimeStart: '',
@@ -3622,11 +3984,18 @@ function App() {
                 if (!window.confirm('האם את בטוחה שברצונך למחוק את המבחן? פעולה זו תסיר גם את מפגשי הלמידה שתוכננו עבורו בלוח המשימות.')) {
                     return;
                 }
-                updateUserData(prev => ({
-                    ...prev,
-                    exams: (prev.exams || []).filter(e => e.id !== examId),
-                    tasks: (prev.tasks || []).filter(t => t.examId !== examId)
-                }));
+                updateUserData(prev => {
+                    const examTaskIds = (prev.tasks || []).filter(t => t.examId === examId).map(t => t.id);
+                    const deletedTaskIds = Array.from(new Set([...(prev.deletedTaskIds || []), ...examTaskIds]));
+                    const deletedExamIds = Array.from(new Set([...(prev.deletedExamIds || []), examId]));
+                    return {
+                        ...prev,
+                        exams: (prev.exams || []).filter(e => e.id !== examId),
+                        tasks: (prev.tasks || []).filter(t => t.examId !== examId),
+                        deletedTaskIds,
+                        deletedExamIds
+                    };
+                });
                 showToast('המבחן נמחק בהצלחה', 'info');
             };
 
@@ -4243,9 +4612,9 @@ function App() {
                         const taskDate = getTaskDate(t);
                         if (!taskDate || isNaN(taskDate.getTime())) return false;
                         if (analyticsTimeFilter === 'last7') {
-                            const sevenDaysAgo = new Date();
-                            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-                            return taskDate >= sevenDaysAgo;
+                            const now = new Date();
+                            const startOfWeekSunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay(), 0, 0, 0, 0);
+                            return taskDate >= startOfWeekSunday;
                         }
                         if (analyticsTimeFilter === 'last30') {
                             const thirtyDaysAgo = new Date();
@@ -4266,9 +4635,9 @@ function App() {
                         const exDate = new Date(ex.date);
                         if (!exDate || isNaN(exDate.getTime())) return false;
                         if (analyticsTimeFilter === 'last7') {
-                            const sevenDaysAgo = new Date();
-                            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-                            return exDate >= sevenDaysAgo;
+                            const now = new Date();
+                            const startOfWeekSunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay(), 0, 0, 0, 0);
+                            return exDate >= startOfWeekSunday;
                         }
                         if (analyticsTimeFilter === 'last30') {
                             const thirtyDaysAgo = new Date();
@@ -4453,6 +4822,114 @@ function App() {
             }
 
 
+            const renderFeedbackModal = () => {
+                if (!isFeedbackModalOpen) return null;
+                return (
+                    <div className="fixed inset-0 bg-stone-900/60 backdrop-blur-xs z-[10005] flex items-center justify-center p-4 animate-[fadeIn_0.15s_ease-out]"
+                         dir="rtl"
+                         onClick={() => setIsFeedbackModalOpen(false)}>
+                        <div className="bg-white rounded-3xl w-full max-w-md p-6 md:p-7 shadow-2xl border border-stone-200 relative animate-[scaleUp_0.15s_ease-out]"
+                             onClick={e => e.stopPropagation()}>
+                            <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-stone-100">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-purple-100 to-indigo-100 text-purple-700 flex items-center justify-center text-2xl shadow-xs">
+                                        💬
+                                    </div>
+                                    <div>
+                                        <h3 className="font-black text-lg text-stone-800">תיבת הערות, תקלות ובקשות</h3>
+                                        <p className="text-xs text-stone-500 font-medium mt-0.5">נתקלת בבעיה או שיש לך רעיון לאפליקציה? כתבי כאן!</p>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsFeedbackModalOpen(false)}
+                                    className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full transition-colors active:scale-95">
+                                    <IconX className="w-4 h-4"/>
+                                </button>
+                            </div>
+
+                            <form onSubmit={handleSendUserFeedback} className="space-y-4">
+                                <div>
+                                    <label className="block text-xs font-bold text-stone-600 mb-2">סוג הפנייה:</label>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {[
+                                            { id: 'bug', label: 'תקלה / באג', icon: '🐞', activeCls: 'bg-rose-50 border-rose-400 text-rose-700 ring-2 ring-rose-100' },
+                                            { id: 'request', label: 'בקשה / רעיון', icon: '💡', activeCls: 'bg-amber-50 border-amber-400 text-amber-800 ring-2 ring-amber-100' },
+                                            { id: 'comment', label: 'הערה כללית', icon: '💬', activeCls: 'bg-purple-50 border-purple-400 text-purple-700 ring-2 ring-purple-100' }
+                                        ].map(opt => (
+                                            <button
+                                                key={opt.id}
+                                                type="button"
+                                                onClick={() => setFeedbackType(opt.id)}
+                                                className={`p-2.5 rounded-2xl border text-center transition-all flex flex-col items-center gap-1 active:scale-95 ${
+                                                    feedbackType === opt.id
+                                                        ? `${opt.activeCls} font-black`
+                                                        : 'bg-stone-50 border-stone-200 text-stone-600 font-bold hover:bg-stone-100'
+                                                }`}>
+                                                <span className="text-lg">{opt.icon}</span>
+                                                <span className="text-[11px]">{opt.label}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {(!globalState?.activeUser || !activeUserData) ? (
+                                    <div>
+                                        <label className="block text-xs font-bold text-stone-600 mb-1.5">השם שלך:</label>
+                                        <input
+                                            type="text"
+                                            value={feedbackGuestName}
+                                            onChange={e => setFeedbackGuestName(e.target.value)}
+                                            placeholder="איך קוראים לך?"
+                                            className="w-full p-3 bg-stone-50 border border-stone-200 rounded-xl text-sm font-medium focus:bg-white focus:border-purple-400 outline-none"
+                                        />
+                                    </div>
+                                ) : (
+                                    <div className="bg-stone-50 border border-stone-200/80 rounded-xl px-3.5 py-2.5 flex items-center justify-between text-xs">
+                                        <span className="text-stone-500 font-semibold">נשלח מאת:</span>
+                                        <span className="font-bold text-stone-800">{activeUserData.name} <span className="text-stone-400 font-normal" dir="ltr">(@{globalState.activeUser})</span></span>
+                                    </div>
+                                )}
+
+                                <div>
+                                    <label className="block text-xs font-bold text-stone-600 mb-1.5">פירוט ההודעה (אפשר לכתוב כמה משפטים שרוצים):</label>
+                                    <textarea
+                                        rows="5"
+                                        required
+                                        value={feedbackMessage}
+                                        onChange={e => setFeedbackMessage(e.target.value)}
+                                        placeholder={
+                                            feedbackType === 'bug'
+                                                ? 'תארי מה קרה, באיזה מסך באפליקציה זה הופיע ומה לא עבד כמו שצריך...'
+                                                : feedbackType === 'request'
+                                                ? 'ספרי איזה פיצ\'ר או שדרוג היית רוצה שנוסיף לאפליקציה...'
+                                                : 'כתבי כאן כל הערה, שאלה או משוב שתרצי...'
+                                        }
+                                        className="w-full p-3.5 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium leading-relaxed focus:bg-white focus:ring-2 focus:ring-purple-200 focus:border-purple-400 outline-none resize-y"
+                                    />
+                                </div>
+
+                                <div className="flex gap-2.5 pt-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsFeedbackModalOpen(false)}
+                                        className="flex-1 py-3 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-xl font-bold text-xs transition-colors active:scale-95">
+                                        ביטול
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        disabled={isSubmittingFeedback}
+                                        className="flex-[2] py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 text-white rounded-xl font-bold text-sm shadow-md shadow-purple-500/20 transition-all active:scale-95 flex items-center justify-center gap-2">
+                                        <span>{isSubmittingFeedback ? '⏳' : '🚀'}</span>
+                                        <span>{isSubmittingFeedback ? 'שולח ושומר...' : 'שליחת הפנייה'}</span>
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                );
+            };
+
             if (!globalState.activeUser || !activeUserData) {
                 if (isAdminLoggedIn) {
                     return (
@@ -4479,6 +4956,20 @@ function App() {
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-2.5 flex-wrap relative z-10">
+                                        <a 
+                                            href="./feedback-doc.html"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="bg-purple-600 hover:bg-purple-500 text-white px-3.5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 active:scale-95 transition-all shadow-sm">
+                                            <span>💬</span> מסמך תקלות ובקשות ↗️
+                                        </a>
+                                        <a 
+                                            href="./admin-log-doc.html"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 active:scale-95 transition-all shadow-sm">
+                                            <span>📋</span> מסמך שינויי אדמין ↗️
+                                        </a>
                                         <button 
                                             onClick={loadAdminUsers}
                                             className="bg-stone-800 hover:bg-stone-700 text-stone-200 px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 active:scale-95 transition-all">
@@ -4973,12 +5464,25 @@ function App() {
                                                         const p = document.getElementById('adminEditPass')?.value;
                                                         const ph = document.getElementById('adminEditPhone')?.value;
                                                         const p1 = document.getElementById('adminEditParent1')?.value;
+                                                        const newName = n || selectedAdminUser.name;
+                                                        const newPass = p || selectedAdminUser.password;
+                                                        const changes = [];
+                                                        if (newName !== selectedAdminUser.name) changes.push(`שם תצוגה: "${selectedAdminUser.name}" ← "${newName}"`);
+                                                        if (newPass !== selectedAdminUser.password) changes.push(`סיסמה עודכנה`);
+                                                        if ((ph || '') !== (selectedAdminUser.phoneNumber || '')) changes.push(`טלפון תלמידה: "${selectedAdminUser.phoneNumber || 'ללא'}" ← "${ph || 'ללא'}"`);
+                                                        if ((p1 || '') !== (selectedAdminUser.parentPhoneNumber || '')) changes.push(`טלפון הורה: "${selectedAdminUser.parentPhoneNumber || 'ללא'}" ← "${p1 || 'ללא'}"`);
                                                         saveAdminUserUpdate(selectedAdminUser.username, {
-                                                            name: n || selectedAdminUser.name,
-                                                            password: p || selectedAdminUser.password,
+                                                            name: newName,
+                                                            password: newPass,
                                                             phoneNumber: ph,
                                                             parentPhoneNumber: p1
                                                         });
+                                                        recordAdminAuditLog(
+                                                            'עדכון פרטים אישיים / סיסמה',
+                                                            'profile',
+                                                            selectedAdminUser,
+                                                            changes.length > 0 ? changes.join(' | ') : 'שמירת פרטים אישיים ללא שינוי ערכים'
+                                                        );
                                                     }}
                                                     className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 rounded-xl text-xs shadow-md active:scale-95 transition-all">
                                                     שמור פרטי משתמש 💾
@@ -4994,6 +5498,7 @@ function App() {
 
                 return (
                     <div className="min-h-screen flex items-center justify-center bg-[#FAFAFA] p-4" dir="rtl">
+                        {renderFeedbackModal()}
                         <div className="bg-white p-8 md:p-10 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] w-full max-w-sm border border-stone-100 relative overflow-hidden">
                             <div className="absolute top-0 right-0 w-32 h-32 bg-purple-100 rounded-full blur-3xl -mr-16 -mt-16 opacity-60 pointer-events-none"></div>
                             <div className="absolute bottom-0 left-0 w-32 h-32 bg-rose-100 rounded-full blur-3xl -ml-16 -mb-16 opacity-60 pointer-events-none"></div>
@@ -5030,6 +5535,12 @@ function App() {
                             <div className="text-center text-[11px] text-stone-400 mt-6 font-medium relative z-10">
                                 משתמשת חדשה? הקלידי שם וסיסמה והחשבון ייווצר בענן.
                             </div>
+                            <button
+                                type="button"
+                                onClick={() => setIsFeedbackModalOpen(true)}
+                                className="w-full mt-4 py-2.5 bg-purple-50/80 hover:bg-purple-100/80 text-purple-700 border border-purple-200/70 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 relative z-10 active:scale-95">
+                                <span>💬</span> דיווח על תקלה או בקשה לאפליקציה
+                            </button>
                         </div>
                     </div>
                 );
@@ -5048,7 +5559,7 @@ function App() {
                 const navItems = [
                     { id: 'dashboard', label: 'ראשי', icon: IconSparkle },
                     { id: 'tasks', label: 'משימות', icon: IconList },
-                    { id: 'exam_prep', label: 'הכנה למבחנים', icon: IconBrain },
+                    { id: 'exam_prep', label: 'מבחנים', icon: IconBrain },
                     { id: 'social', label: 'חברות 👑', icon: IconUsers },
                     { id: 'more', label: extendedTabName, isMore: true }
                 ];
@@ -5091,1091 +5602,9 @@ function App() {
             const safePointsHistory = activeUserData.pointsHistory || [];
             const safeStreakHistory = activeUserData.streakHistory || [];
 
-            
-            // =========================================================================
-            // PSYCHOMETRY MODULE (פסיכומטרי דו-תחומי)
-            // =========================================================================
-            const PsychometrySection = ({ activeUserData, updateUserData, showToast }) => {
-                const psycho = activeUserData.psychometry || { essays: [], mentalMathLogs: [], sections: [] };
-                const essays = psycho.essays || [];
-                const mathLogs = psycho.mentalMathLogs || [];
-                const sections = psycho.sections || [];
-
-                // Audio chime helper
-                const playSound = (type = 'chime') => {
-                    try {
-                        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                        if (type === 'warning') {
-                            const osc = ctx.createOscillator();
-                            const gain = ctx.createGain();
-                            osc.connect(gain);
-                            gain.connect(ctx.destination);
-                            osc.frequency.setValueAtTime(440, ctx.currentTime);
-                            osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
-                            gain.gain.setValueAtTime(0.3, ctx.currentTime);
-                            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-                            osc.start();
-                            osc.stop(ctx.currentTime + 0.4);
-                        } else {
-                            const osc = ctx.createOscillator();
-                            const gain = ctx.createGain();
-                            osc.connect(gain);
-                            gain.connect(ctx.destination);
-                            osc.frequency.setValueAtTime(587.33, ctx.currentTime);
-                            osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
-                            gain.gain.setValueAtTime(0.3, ctx.currentTime);
-                            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-                            osc.start();
-                            osc.stop(ctx.currentTime + 0.35);
-                        }
-                    } catch(e) {}
-                };
-
-                // Date helpers
-                const getWeekBounds = (baseDate = new Date()) => {
-                    const d = new Date(baseDate);
-                    const start = new Date(d);
-                    start.setDate(d.getDate() - d.getDay()); // Sunday 00:00:00
-                    start.setHours(0,0,0,0);
-                    const end = new Date(start);
-                    end.setDate(start.getDate() + 6); // Saturday 23:59:59
-                    end.setHours(23,59,59,999);
-                    return { start, end };
-                };
-
-                const toIsoDate = (d) => {
-                    const date = new Date(d);
-                    const y = date.getFullYear();
-                    const m = String(date.getMonth() + 1).padStart(2, '0');
-                    const day = String(date.getDate()).padStart(2, '0');
-                    return `${y}-${m}-${day}`;
-                };
-
-                const now = new Date();
-                const { start: weekStart, end: weekEnd } = useMemo(() => getWeekBounds(now), []);
-                const todayStr = useMemo(() => toIsoDate(now), []);
-
-                // Filter current week
-                const thisWeekEssays = useMemo(() => {
-                    return essays.filter(e => {
-                        const d = new Date(e.date || e.createdAt);
-                        return !isNaN(d.getTime()) && d >= weekStart && d <= weekEnd;
-                    });
-                }, [essays, weekStart, weekEnd]);
-
-                const thisWeekSections = useMemo(() => {
-                    return sections.filter(s => {
-                        const d = new Date(s.date || s.createdAt);
-                        return !isNaN(d.getTime()) && d >= weekStart && d <= weekEnd;
-                    });
-                }, [sections, weekStart, weekEnd]);
-
-                const hasDoneMathToday = useMemo(() => {
-                    return mathLogs.some(l => l.date === todayStr);
-                }, [mathLogs, todayStr]);
-
-                // Streaks calculation
-                const calcDailyStreak = (logs) => {
-                    if (!logs || logs.length === 0) return 0;
-                    const dateSet = new Set(logs.map(l => l.date));
-                    let streak = 0;
-                    let check = new Date(now);
-                    const tStr = toIsoDate(check);
-                    if (dateSet.has(tStr)) {
-                        streak++;
-                        check.setDate(check.getDate() - 1);
-                    } else {
-                        check.setDate(check.getDate() - 1);
-                        if (!dateSet.has(toIsoDate(check))) return 0;
-                    }
-                    while (true) {
-                        const s = toIsoDate(check);
-                        if (dateSet.has(s)) {
-                            streak++;
-                            check.setDate(check.getDate() - 1);
-                        } else {
-                            break;
-                        }
-                    }
-                    return streak;
-                };
-
-                const calcWeeklyStreak = (items, targetPerWeek) => {
-                    if (!items || items.length === 0) return 0;
-                    const countInWeek = (s, e) => items.filter(it => {
-                        const d = new Date(it.date || it.createdAt);
-                        return !isNaN(d.getTime()) && d >= s && d <= e;
-                    }).length;
-
-                    let streak = 0;
-                    if (countInWeek(weekStart, weekEnd) >= targetPerWeek) streak++;
-
-                    let checkStart = new Date(weekStart);
-                    while (true) {
-                        checkStart.setDate(checkStart.getDate() - 7);
-                        const checkEnd = new Date(checkStart);
-                        checkEnd.setDate(checkStart.getDate() + 6);
-                        checkEnd.setHours(23,59,59,999);
-                        if (countInWeek(checkStart, checkEnd) >= targetPerWeek) {
-                            streak++;
-                        } else {
-                            break;
-                        }
-                    }
-                    return streak;
-                };
-
-                const essayStreakWeeks = useMemo(() => calcWeeklyStreak(essays, 2), [essays, weekStart, weekEnd]);
-                const mathStreakDays = useMemo(() => calcDailyStreak(mathLogs), [mathLogs]);
-                const sectionStreakWeeks = useMemo(() => calcWeeklyStreak(sections, 4), [sections, weekStart, weekEnd]);
-
-                // Modal & Form States
-                const [isEssayModalOpen, setIsEssayModalOpen] = useState(false);
-                const [isSectionModalOpen, setIsSectionModalOpen] = useState(false);
-                const [selectedSectionForMistakes, setSelectedSectionForMistakes] = useState(null);
-
-                // Essay form
-                const [essayTopic, setEssayTopic] = useState('');
-                const [essayDate, setEssayDate] = useState(() => todayStr);
-                const [essayNotes, setEssayNotes] = useState('');
-
-                // Section form
-                const [secType, setSecType] = useState('quantitative'); // 'quantitative' (20) | 'verbal' (23)
-                const [secCorrect, setSecCorrect] = useState('');
-                const [secSource, setSecSource] = useState('');
-                const [secTime, setSecTime] = useState('20');
-                const [secDate, setSecDate] = useState(() => todayStr);
-                const [secMistakeReasons, setSecMistakeReasons] = useState([]);
-                const [secMistakeNote, setSecMistakeNote] = useState('');
-
-                // =========================================================
-                // TIMER 1: Mental Math (15:00)
-                // =========================================================
-                const [mathTimerSecs, setMathTimerSecs] = useState(15 * 60);
-                const [isMathTimerRunning, setIsMathTimerRunning] = useState(false);
-                const mathIntervalRef = useRef(null);
-
-                useEffect(() => {
-                    if (isMathTimerRunning) {
-                        mathIntervalRef.current = setInterval(() => {
-                            setMathTimerSecs(prev => {
-                                if (prev <= 1) {
-                                    clearInterval(mathIntervalRef.current);
-                                    setIsMathTimerRunning(false);
-                                    playSound('chime');
-                                    handleCompleteMentalMath(true);
-                                    return 15 * 60;
-                                }
-                                return prev - 1;
-                            });
-                        }, 1000);
-                    } else if (mathIntervalRef.current) {
-                        clearInterval(mathIntervalRef.current);
-                    }
-                    return () => clearInterval(mathIntervalRef.current);
-                }, [isMathTimerRunning]);
-
-                // =========================================================
-                // TIMER 2: Section 20-min Timer with 5-minute warning
-                // =========================================================
-                const [sectionTimerSecs, setSectionTimerSecs] = useState(20 * 60);
-                const [isSectionTimerRunning, setIsSectionTimerRunning] = useState(false);
-                const [sectionTimerWarningFired, setSectionTimerWarningFired] = useState(false);
-                const [sectionTimerType, setSectionTimerType] = useState('quantitative');
-                const sectionIntervalRef = useRef(null);
-
-                useEffect(() => {
-                    if (isSectionTimerRunning) {
-                        sectionIntervalRef.current = setInterval(() => {
-                            setSectionTimerSecs(prev => {
-                                // 5 minutes warning at exactly 5:00 (300s)
-                                if (prev === 300 && !sectionTimerWarningFired) {
-                                    setSectionTimerWarningFired(true);
-                                    playSound('warning');
-                                    if (showToast) showToast('⚠️ נותרו 5 דקות לסיום הפרק! להתחיל לסמן שאלות שלא הספקת!', 'warning');
-                                }
-                                if (prev <= 1) {
-                                    clearInterval(sectionIntervalRef.current);
-                                    setIsSectionTimerRunning(false);
-                                    playSound('chime');
-                                    if (showToast) showToast('נגמר הזמן לפרק! נא להזין תוצאה ⏱️', 'info');
-                                    setSecType(sectionTimerType);
-                                    setSecTime('20');
-                                    setIsSectionModalOpen(true);
-                                    setSectionTimerSecs(20 * 60);
-                                    setSectionTimerWarningFired(false);
-                                    return 20 * 60;
-                                }
-                                return prev - 1;
-                            });
-                        }, 1000);
-                    } else if (sectionIntervalRef.current) {
-                        clearInterval(sectionIntervalRef.current);
-                    }
-                    return () => clearInterval(sectionIntervalRef.current);
-                }, [isSectionTimerRunning, sectionTimerWarningFired, sectionTimerType]);
-
-                // =========================================================
-                // TIMER 3: Guided Essay (30:00) with 3 phases
-                // =========================================================
-                const [essayTimerSecs, setEssayTimerSecs] = useState(30 * 60);
-                const [isEssayTimerRunning, setIsEssayTimerRunning] = useState(false);
-                const essayIntervalRef = useRef(null);
-
-                useEffect(() => {
-                    if (isEssayTimerRunning) {
-                        essayIntervalRef.current = setInterval(() => {
-                            setEssayTimerSecs(prev => {
-                                if (prev <= 1) {
-                                    clearInterval(essayIntervalRef.current);
-                                    setIsEssayTimerRunning(false);
-                                    playSound('chime');
-                                    if (showToast) showToast('הסתיים זמן החיבור (30 דקות)! נפתח טופס השמירה ✍️', 'success');
-                                    setIsEssayModalOpen(true);
-                                    setEssayTimerSecs(30 * 60);
-                                    return 30 * 60;
-                                }
-                                return prev - 1;
-                            });
-                        }, 1000);
-                    } else if (essayIntervalRef.current) {
-                        clearInterval(essayIntervalRef.current);
-                    }
-                    return () => clearInterval(essayIntervalRef.current);
-                }, [isEssayTimerRunning]);
-
-                // Essay timer phase
-                const essayPhase = useMemo(() => {
-                    const elapsed = 30 * 60 - essayTimerSecs;
-                    if (elapsed < 5 * 60) {
-                        return { step: 1, title: 'שלב 1: תכנון וסיעור מוחות (עוד ' + Math.ceil((300 - elapsed) / 60) + " דק')", color: 'text-amber-600 bg-amber-50' };
-                    } else if (elapsed < 25 * 60) {
-                        return { step: 2, title: 'שלב 2: כתיבת הפסקאות (עוד ' + Math.ceil((1500 - elapsed) / 60) + " דק')", color: 'text-indigo-600 bg-indigo-50' };
-                    } else {
-                        return { step: 3, title: 'שלב 3: הגהה וליטוש לשוני (עוד ' + Math.ceil((1800 - elapsed) / 60) + " דק')", color: 'text-emerald-600 bg-emerald-50' };
-                    }
-                }, [essayTimerSecs]);
-
-                // Accuracy statistics
-                const stats = useMemo(() => {
-                    const quantSecs = sections.filter(s => s.type === 'quantitative');
-                    const verbalSecs = sections.filter(s => s.type === 'verbal');
-
-                    const quantAvg = quantSecs.length > 0 
-                        ? (quantSecs.reduce((a, c) => a + (c.correct || 0), 0) / quantSecs.length).toFixed(1)
-                        : null;
-                    const quantPct = quantSecs.length > 0
-                        ? Math.round((quantSecs.reduce((a, c) => a + (c.correct || 0), 0) / (quantSecs.length * 20)) * 100)
-                        : null;
-
-                    const verbalAvg = verbalSecs.length > 0
-                        ? (verbalSecs.reduce((a, c) => a + (c.correct || 0), 0) / verbalSecs.length).toFixed(1)
-                        : null;
-                    const verbalPct = verbalSecs.length > 0
-                        ? Math.round((verbalSecs.reduce((a, c) => a + (c.correct || 0), 0) / (verbalSecs.length * 23)) * 100)
-                        : null;
-
-                    return { quantAvg, quantPct, quantCount: quantSecs.length, verbalAvg, verbalPct, verbalCount: verbalSecs.length, totalCount: sections.length };
-                }, [sections]);
-
-                // Actions
-                const handleCompleteMentalMath = (fromTimer = false) => {
-                    if (hasDoneMathToday) {
-                        if (showToast) showToast('כבר השלמת את יעד החישוב המהיר להיום! אלופה 🔥', 'info');
-                        return;
-                    }
-                    const newLog = { id: 'pmm_' + Date.now(), date: todayStr, durationMinutes: 15, timestamp: Date.now() };
-                    const nextLogs = [newLog, ...mathLogs];
-
-                    updateUserData(user => {
-                        const currentPsycho = user.psychometry || {};
-                        const prevPts = user.weeklyPoints || 0;
-                        const prevTot = user.totalPoints || 0;
-                        return {
-                            ...user,
-                            weeklyPoints: prevPts + 15,
-                            totalPoints: prevTot + 15,
-                            taskStreak: (user.taskStreak || 0) > 0 ? user.taskStreak : 1,
-                            psychometry: { ...currentPsycho, mentalMathLogs: nextLogs }
-                        };
-                    });
-
-                    playSound('chime');
-                    if (showToast) showToast('15 דקות חישוב מהיר הושלמו! הרצף היומי נשמר 🔥 (+15 נקודות)', 'success');
-                };
-
-                const handleSaveEssay = (e) => {
-                    e.preventDefault();
-                    const newEssay = {
-                        id: 'pe_' + Date.now(),
-                        topic: essayTopic.trim() || 'מטלת כתיבה שבועית',
-                        date: essayDate || todayStr,
-                        notes: essayNotes.trim(),
-                        createdAt: Date.now()
-                    };
-                    const nextEssays = [newEssay, ...essays];
-
-                    updateUserData(user => {
-                        const currentPsycho = user.psychometry || {};
-                        const prevPts = user.weeklyPoints || 0;
-                        const prevTot = user.totalPoints || 0;
-                        return {
-                            ...user,
-                            weeklyPoints: prevPts + 25,
-                            totalPoints: prevTot + 25,
-                            taskStreak: (user.taskStreak || 0) > 0 ? user.taskStreak : 1,
-                            psychometry: { ...currentPsycho, essays: nextEssays }
-                        };
-                    });
-
-                    playSound('chime');
-                    setIsEssayModalOpen(false);
-                    setEssayTopic('');
-                    setEssayNotes('');
-                    if (showToast) showToast('החיבור תועד בהצלחה! +25 נקודות ✍️🎉', 'success');
-                };
-
-                const handleDeleteEssay = (id) => {
-                    if (!confirm('האם למחוק חיבור זה מהרשימה?')) return;
-                    const nextEssays = essays.filter(e => e.id !== id);
-                    updateUserData(user => ({
-                        ...user,
-                        psychometry: { ...(user.psychometry || {}), essays: nextEssays }
-                    }));
-                    if (showToast) showToast('החיבור נמחק', 'info');
-                };
-
-                const handleSaveSection = (e) => {
-                    e.preventDefault();
-                    const maxQ = secType === 'quantitative' ? 20 : 23;
-                    const correctNum = parseInt(secCorrect, 10);
-                    if (isNaN(correctNum) || correctNum < 0 || correctNum > maxQ) {
-                        if (showToast) showToast(`מספר תשובות לא תקין (חייב להיות 0-${maxQ})`, 'warning');
-                        return;
-                    }
-
-                    const newSection = {
-                        id: 'ps_' + Date.now(),
-                        type: secType,
-                        correct: correctNum,
-                        total: maxQ,
-                        mistakes: maxQ - correctNum,
-                        percentage: Math.round((correctNum / maxQ) * 100),
-                        source: secSource.trim() || (secType === 'quantitative' ? 'פרק כמותי' : 'פרק מילולי'),
-                        timeMinutes: parseInt(secTime, 10) || 20,
-                        date: secDate || todayStr,
-                        mistakeReasons: secMistakeReasons,
-                        mistakeNote: secMistakeNote.trim(),
-                        createdAt: Date.now()
-                    };
-                    const nextSections = [newSection, ...sections];
-
-                    updateUserData(user => {
-                        const currentPsycho = user.psychometry || {};
-                        const prevPts = user.weeklyPoints || 0;
-                        const prevTot = user.totalPoints || 0;
-                        return {
-                            ...user,
-                            weeklyPoints: prevPts + 20,
-                            totalPoints: prevTot + 20,
-                            taskStreak: (user.taskStreak || 0) > 0 ? user.taskStreak : 1,
-                            psychometry: { ...currentPsycho, sections: nextSections }
-                        };
-                    });
-
-                    playSound('chime');
-                    setIsSectionModalOpen(false);
-                    setSecCorrect('');
-                    setSecSource('');
-                    setSecMistakeReasons([]);
-                    setSecMistakeNote('');
-                    if (showToast) {
-                        showToast(`פרק תועד בהצלחה! ${correctNum}/${maxQ} (${newSection.percentage}%) • +20 נקודות 🎯`, 'success');
-                    }
-                };
-
-                const handleDeleteSection = (id) => {
-                    if (!confirm('האם למחוק פרק זה מהרשימה?')) return;
-                    const nextSections = sections.filter(s => s.id !== id);
-                    updateUserData(user => ({
-                        ...user,
-                        psychometry: { ...(user.psychometry || {}), sections: nextSections }
-                    }));
-                    if (showToast) showToast('הפרק נמחק', 'info');
-                };
-
-                const toggleMistakeReason = (reason) => {
-                    setSecMistakeReasons(prev => 
-                        prev.includes(reason) ? prev.filter(r => r !== reason) : [...prev, reason]
-                    );
-                };
-
-                const fmtTimer = (totalSeconds) => {
-                    const m = Math.floor(totalSeconds / 60);
-                    const s = totalSeconds % 60;
-                    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-                };
-
-                return (
-                    <div className="space-y-6 animate-[fadeIn_0.3s_ease-out]">
-                        {/* Header Banner */}
-                        <div className="bg-gradient-to-br from-indigo-950 via-purple-950 to-slate-900 text-white rounded-3xl p-6 md:p-8 shadow-xl relative overflow-hidden">
-                            <div className="absolute -right-10 -bottom-10 w-48 h-48 bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
-                            <div className="absolute -left-10 -top-10 w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl pointer-events-none"></div>
-
-                            <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                                <div>
-                                    <div className="flex items-center gap-2 mb-2 flex-wrap">
-                                        <span className="bg-indigo-500/30 border border-indigo-400/40 text-indigo-200 text-xs font-black px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1.5">
-                                            <span>🎯</span> פסיכומטרי דו-תחומי
-                                        </span>
-                                        <span className="text-xs text-indigo-300 font-medium bg-white/5 px-2.5 py-1 rounded-full border border-white/10">
-                                            שבוע א'-ש' ({weekStart.toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})} - {weekEnd.toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})})
-                                        </span>
-                                    </div>
-                                    <h2 className="text-2xl md:text-3xl font-black text-white tracking-tight">
-                                        הסטריקים של הפסיכומטרי 🔥
-                                    </h2>
-                                    <p className="text-xs md:text-sm text-purple-200/90 mt-1 max-w-xl">
-                                        כמותי (20 שאלות) ומילולי (23 שאלות + חיבור). כל למידה כאן מחזקת גם את הסטריק הראשי באפליקציה!
-                                    </p>
-                                </div>
-
-                                <div className="flex items-center gap-2.5 flex-wrap">
-                                    <div className="bg-white/10 backdrop-blur-md border border-white/10 px-3.5 py-2.5 rounded-2xl flex items-center gap-2.5">
-                                        <span className="text-2xl">✍️</span>
-                                        <div>
-                                            <div className="text-[10px] text-purple-200 font-bold uppercase">חיבורים השבוע</div>
-                                            <div className="text-sm font-black text-white">{thisWeekEssays.length} / 2</div>
-                                        </div>
-                                    </div>
-                                    <div className="bg-white/10 backdrop-blur-md border border-white/10 px-3.5 py-2.5 rounded-2xl flex items-center gap-2.5">
-                                        <span className="text-2xl">🧮</span>
-                                        <div>
-                                            <div className="text-[10px] text-purple-200 font-bold uppercase">חישוב יומי</div>
-                                            <div className="text-sm font-black text-white">{hasDoneMathToday ? 'הושלם! 🎉' : 'טרם בוצע'}</div>
-                                        </div>
-                                    </div>
-                                    <div className="bg-white/10 backdrop-blur-md border border-white/10 px-3.5 py-2.5 rounded-2xl flex items-center gap-2.5">
-                                        <span className="text-2xl">⏱️</span>
-                                        <div>
-                                            <div className="text-[10px] text-purple-200 font-bold uppercase">פרקים השבוע</div>
-                                            <div className="text-sm font-black text-white">{thisWeekSections.length} / 4</div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Accuracy Statistics (Idea 4) */}
-                        {stats.totalCount > 0 && (
-                            <div className="bg-white p-5 rounded-3xl border border-stone-200/80 shadow-xs">
-                                <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-lg">📊</span>
-                                        <span className="font-bold text-stone-800 text-sm">מדד דיוק ממוצע (מצטבר)</span>
-                                    </div>
-                                    <span className="text-xs text-stone-400 font-medium">סך הכל נפתרו {stats.totalCount} פרקים</span>
-                                </div>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div className="p-4 bg-blue-50/60 rounded-2xl border border-blue-100 flex items-center justify-between">
-                                        <div>
-                                            <div className="text-xs font-bold text-blue-900 flex items-center gap-1.5">
-                                                <span>📐</span> חשיבה כמותית (מתוך 20)
-                                            </div>
-                                            <div className="text-xs text-blue-600 mt-0.5">{stats.quantCount} פרקים נפתרו</div>
-                                        </div>
-                                        <div className="text-left">
-                                            {stats.quantAvg ? (
-                                                <>
-                                                    <div className="text-xl font-black text-blue-950">{stats.quantAvg} / 20</div>
-                                                    <div className="text-xs font-bold text-blue-700">{stats.quantPct}% דיוק</div>
-                                                </>
-                                            ) : (
-                                                <span className="text-xs text-stone-400">טרם נפתר</span>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    <div className="p-4 bg-purple-50/60 rounded-2xl border border-purple-100 flex items-center justify-between">
-                                        <div>
-                                            <div className="text-xs font-bold text-purple-900 flex items-center gap-1.5">
-                                                <span>📖</span> חשיבה מילולית (מתוך 23)
-                                            </div>
-                                            <div className="text-xs text-purple-600 mt-0.5">{stats.verbalCount} פרקים נפתרו</div>
-                                        </div>
-                                        <div className="text-left">
-                                            {stats.verbalAvg ? (
-                                                <>
-                                                    <div className="text-xl font-black text-purple-950">{stats.verbalAvg} / 23</div>
-                                                    <div className="text-xs font-bold text-purple-700">{stats.verbalPct}% דיוק</div>
-                                                </>
-                                            ) : (
-                                                <span className="text-xs text-stone-400">טרם נפתר</span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* 3 Main Streaks Grid */}
-                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-                            {/* ========================================================= */}
-                            {/* STREAK 1: ESSAYS (2 per week + Guided 30-min Timer) */}
-                            {/* ========================================================= */}
-                            <div className="bg-white rounded-3xl p-6 border border-stone-200/80 shadow-sm flex flex-col justify-between hover:border-amber-200 transition-all">
-                                <div>
-                                    <div className="flex items-center justify-between mb-3">
-                                        <div className="flex items-center gap-2.5">
-                                            <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center text-lg shadow-2xs">
-                                                ✍️
-                                            </div>
-                                            <div>
-                                                <h3 className="font-bold text-stone-800 text-base">מטלת כתיבה</h3>
-                                                <div className="text-xs text-stone-500 font-medium">יעד: 2 חיבורים בשבוע (א'-ש')</div>
-                                            </div>
-                                        </div>
-                                        <span className="text-xs font-bold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-xl border border-amber-200/70 inline-flex items-center gap-1">
-                                            <span>🏆</span> {essayStreakWeeks} {essayStreakWeeks === 1 ? 'שבוע' : 'שבועות'} רצופים
-                                        </span>
-                                    </div>
-
-                                    {/* Progress Bar */}
-                                    <div className="mt-3 mb-4">
-                                        <div className="flex justify-between items-center text-xs font-bold mb-1.5">
-                                            <span className="text-stone-600">התקדמות השבוע</span>
-                                            <span className={thisWeekEssays.length >= 2 ? 'text-emerald-600 font-black' : 'text-stone-800'}>
-                                                {thisWeekEssays.length} / 2 {thisWeekEssays.length >= 2 ? '• הושלם! 🎉' : ''}
-                                            </span>
-                                        </div>
-                                        <div className="w-full h-3 bg-stone-100 rounded-full overflow-hidden p-0.5">
-                                            <div 
-                                                className={`h-full rounded-full transition-all duration-500 ${
-                                                    thisWeekEssays.length >= 2 ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-amber-400 to-orange-500'
-                                                }`}
-                                                style={{ width: `${Math.min(100, (thisWeekEssays.length / 2) * 100)}%` }}
-                                            ></div>
-                                        </div>
-                                    </div>
-
-                                    {/* Guided 30-min Essay Timer (Idea 3) */}
-                                    <div className="p-3.5 bg-amber-50/50 rounded-2xl border border-amber-200/70 mb-4 text-center">
-                                        <div className="text-[10px] font-bold text-amber-800 uppercase tracking-wider mb-1 flex items-center justify-center gap-1">
-                                            <span>⏱️</span> טיימר כתיבה מונחה (30 דק')
-                                        </div>
-                                        <div className="text-2xl font-black text-amber-950 font-mono tracking-wider my-0.5">
-                                            {fmtTimer(essayTimerSecs)}
-                                        </div>
-                                        <div className={`text-[10px] font-bold px-2.5 py-0.5 rounded-lg inline-block mb-2 ${essayPhase.color}`}>
-                                            {essayPhase.title}
-                                        </div>
-                                        <div className="flex items-center justify-center gap-2">
-                                            <button 
-                                                onClick={() => setIsEssayTimerRunning(!isEssayTimerRunning)}
-                                                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shadow-xs active:scale-95 ${
-                                                    isEssayTimerRunning ? 'bg-amber-600 text-white' : 'bg-amber-500 hover:bg-amber-600 text-white'
-                                                }`}>
-                                                {isEssayTimerRunning ? '⏸️ השהה' : '▶️ התחל כתיבה'}
-                                            </button>
-                                            <button 
-                                                onClick={() => { setIsEssayTimerRunning(false); setEssayTimerSecs(30 * 60); }}
-                                                className="px-2.5 py-1.5 bg-stone-200 text-stone-600 rounded-xl text-xs font-bold hover:bg-stone-300">
-                                                איפוס
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    {/* Essays List */}
-                                    <div className="space-y-1.5 mb-4 max-h-36 overflow-y-auto custom-scrollbar">
-                                        <div className="text-[11px] font-bold text-stone-400 uppercase tracking-wider">חיבורים השבוע:</div>
-                                        {thisWeekEssays.length === 0 ? (
-                                            <div className="p-2.5 bg-stone-50 rounded-xl text-xs text-stone-400 text-center border border-dashed border-stone-200">
-                                                טרם נכתב חיבור השבוע.
-                                            </div>
-                                        ) : (
-                                            thisWeekEssays.map(essay => (
-                                                <div key={essay.id} className="p-2.5 bg-amber-50/70 rounded-xl border border-amber-100 flex items-center justify-between gap-2 text-xs">
-                                                    <div className="truncate flex-1">
-                                                        <div className="font-bold text-stone-800 truncate">{essay.topic}</div>
-                                                        <div className="text-[10px] text-stone-500">{new Date(essay.date).toLocaleDateString('he-IL', {day:'2-digit', month:'2-digit'})}</div>
-                                                    </div>
-                                                    <button onClick={() => handleDeleteEssay(essay.id)} className="text-stone-400 hover:text-rose-600 p-1" title="מחיקה">✕</button>
-                                                </div>
-                                            ))
-                                        )}
-                                    </div>
-                                </div>
-
-                                <button 
-                                    onClick={() => setIsEssayModalOpen(true)}
-                                    className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-2xl text-xs md:text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-95">
-                                    <span>+</span> תיעוד חיבור שבוצע
-                                </button>
-                            </div>
-
-                            {/* ========================================================= */}
-                            {/* STREAK 2: MENTAL MATH (15 min daily) */}
-                            {/* ========================================================= */}
-                            <div className="bg-white rounded-3xl p-6 border border-stone-200/80 shadow-sm flex flex-col justify-between hover:border-rose-200 transition-all">
-                                <div>
-                                    <div className="flex items-center justify-between mb-3">
-                                        <div className="flex items-center gap-2.5">
-                                            <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-lg shadow-2xs">
-                                                🧮
-                                            </div>
-                                            <div>
-                                                <h3 className="font-bold text-stone-800 text-base">חישוב כמותי מהיר</h3>
-                                                <div className="text-xs text-stone-500 font-medium">כפל, חזקות, שורשים ואחוזים</div>
-                                            </div>
-                                        </div>
-                                        <span className="text-xs font-bold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-xl border border-rose-200/70 inline-flex items-center gap-1">
-                                            <span>🔥</span> {mathStreakDays} {mathStreakDays === 1 ? 'יום' : 'ימים'} רצופים
-                                        </span>
-                                    </div>
-
-                                    {/* Status Box */}
-                                    <div className={`p-3.5 rounded-2xl border mb-3 text-center transition-all ${
-                                        hasDoneMathToday ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-stone-50 border-stone-200 text-stone-700'
-                                    }`}>
-                                        <div className="text-xs font-semibold">סטטוס להיום:</div>
-                                        <div className="text-sm font-black mt-0.5 flex items-center justify-center gap-1">
-                                            {hasDoneMathToday ? '✅ 15 דקות הושלמו להיום!' : '⏳ טרם בוצע היום (יעד: 15 דק')'}
-                                        </div>
-                                    </div>
-
-                                    {/* 15-min Timer */}
-                                    <div className="bg-stone-50 p-4 rounded-2xl border border-stone-200/70 mb-4 text-center">
-                                        <div className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-1">טיימר 15 דקות אינטראקטיבי:</div>
-                                        <div className="text-3xl font-black text-stone-800 tracking-wider font-mono my-1">
-                                            {fmtTimer(mathTimerSecs)}
-                                        </div>
-                                        <div className="flex items-center justify-center gap-2 mt-2">
-                                            <button 
-                                                onClick={() => setIsMathTimerRunning(!isMathTimerRunning)}
-                                                className={`px-4 py-1.5 rounded-xl text-xs font-bold transition-all shadow-xs active:scale-95 ${
-                                                    isMathTimerRunning ? 'bg-rose-600 text-white' : 'bg-rose-500 hover:bg-rose-600 text-white'
-                                                }`}>
-                                                {isMathTimerRunning ? '⏸️ השהה' : '▶️ התחל תרגול'}
-                                            </button>
-                                            <button 
-                                                onClick={() => { setIsMathTimerRunning(false); setMathTimerSecs(15 * 60); }}
-                                                className="px-3 py-1.5 bg-stone-200 text-stone-600 rounded-xl text-xs font-bold hover:bg-stone-300">
-                                                איפוס
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <button 
-                                    disabled={hasDoneMathToday}
-                                    onClick={() => handleCompleteMentalMath(false)}
-                                    className={`w-full py-3 rounded-2xl font-bold text-xs md:text-sm flex items-center justify-center gap-2 transition-all active:scale-95 ${
-                                        hasDoneMathToday ? 'bg-emerald-100 text-emerald-700 cursor-default' : 'bg-rose-500 hover:bg-rose-600 text-white shadow-sm'
-                                    }`}>
-                                    <span>{hasDoneMathToday ? '✓' : '⚡'}</span>
-                                    {hasDoneMathToday ? 'הושלם להיום!' : 'סימנתי שביצעתי 15 דק' עכשיו!'}
-                                </button>
-                            </div>
-
-                            {/* ========================================================= */}
-                            {/* STREAK 3: 4 SECTIONS PER WEEK + 20-min Timer + Mistakes */}
-                            {/* ========================================================= */}
-                            <div className="bg-white rounded-3xl p-6 border border-stone-200/80 shadow-sm flex flex-col justify-between hover:border-indigo-200 transition-all">
-                                <div>
-                                    <div className="flex items-center justify-between mb-3">
-                                        <div className="flex items-center gap-2.5">
-                                            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-lg shadow-2xs">
-                                                ⏱️
-                                            </div>
-                                            <div>
-                                                <h3 className="font-bold text-stone-800 text-base">פתירת פרקים בזמן</h3>
-                                                <div className="text-xs text-stone-500 font-medium">יעד: 4 פרקים בשבוע (א'-ש')</div>
-                                            </div>
-                                        </div>
-                                        <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-xl border border-indigo-200/70 inline-flex items-center gap-1">
-                                            <span>⚡</span> {sectionStreakWeeks} {sectionStreakWeeks === 1 ? 'שבוע' : 'שבועות'} רצופים
-                                        </span>
-                                    </div>
-
-                                    {/* Progress Bar */}
-                                    <div className="mt-3 mb-3">
-                                        <div className="flex justify-between items-center text-xs font-bold mb-1.5">
-                                            <span className="text-stone-600">פרקים שנפתרו השבוע</span>
-                                            <span className={thisWeekSections.length >= 4 ? 'text-emerald-600 font-black' : 'text-stone-800'}>
-                                                {thisWeekSections.length} / 4 {thisWeekSections.length >= 4 ? '• הושלם! 🎉' : ''}
-                                            </span>
-                                        </div>
-                                        <div className="w-full h-3 bg-stone-100 rounded-full overflow-hidden p-0.5">
-                                            <div 
-                                                className={`h-full rounded-full transition-all duration-500 ${
-                                                    thisWeekSections.length >= 4 ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-indigo-500 to-purple-600'
-                                                }`}
-                                                style={{ width: `${Math.min(100, (thisWeekSections.length / 4) * 100)}%` }}
-                                            ></div>
-                                        </div>
-                                    </div>
-
-                                    {/* 20-min Section Timer with 5-min warning (Idea 1) */}
-                                    <div className="p-3 bg-indigo-50/60 rounded-2xl border border-indigo-200/80 mb-3 text-center">
-                                        <div className="flex items-center justify-between mb-1">
-                                            <span className="text-[10px] font-bold text-indigo-800 uppercase">טיימר פרק (20 דק' + התראת 5 דק'):</span>
-                                            <select 
-                                                value={sectionTimerType} 
-                                                onChange={e => setSectionTimerType(e.target.value)} 
-                                                className="text-[10px] bg-white border border-indigo-200 rounded-lg px-2 py-0.5 font-bold text-indigo-900 outline-none">
-                                                <option value="quantitative">כמותי (20)</option>
-                                                <option value="verbal">מילולי (23)</option>
-                                            </select>
-                                        </div>
-                                        <div className="text-2xl font-black text-indigo-950 font-mono my-0.5">
-                                            {fmtTimer(sectionTimerSecs)}
-                                        </div>
-                                        <div className="flex items-center justify-center gap-2 mt-1">
-                                            <button 
-                                                onClick={() => setIsSectionTimerRunning(!isSectionTimerRunning)}
-                                                className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shadow-xs active:scale-95 ${
-                                                    isSectionTimerRunning ? 'bg-indigo-700 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                                                }`}>
-                                                {isSectionTimerRunning ? '⏸️ השהה' : '▶️ התחל פרק'}
-                                            </button>
-                                            <button 
-                                                onClick={() => { setIsSectionTimerRunning(false); setSectionTimerSecs(20 * 60); setSectionTimerWarningFired(false); }}
-                                                className="px-2.5 py-1 bg-stone-200 text-stone-600 rounded-xl text-xs font-bold hover:bg-stone-300">
-                                                איפוס
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    {/* Recent Sections List */}
-                                    <div className="space-y-1.5 mb-3 max-h-32 overflow-y-auto custom-scrollbar">
-                                        <div className="text-[11px] font-bold text-stone-400 uppercase tracking-wider">פרקים שנפתרו השבוע:</div>
-                                        {thisWeekSections.length === 0 ? (
-                                            <div className="p-2.5 bg-stone-50 rounded-xl text-xs text-stone-400 text-center border border-dashed border-stone-200">
-                                                טרם נפתרו פרקים השבוע.
-                                            </div>
-                                        ) : (
-                                            thisWeekSections.map(sec => {
-                                                const isQuant = sec.type === 'quantitative';
-                                                return (
-                                                    <div key={sec.id} className="p-2 bg-stone-50 rounded-xl border border-stone-200 flex items-center justify-between text-xs">
-                                                        <div className="flex items-center gap-2 truncate flex-1 cursor-pointer" onClick={() => setSelectedSectionForMistakes(sec)}>
-                                                            <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${
-                                                                isQuant ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
-                                                            }`}>
-                                                                {isQuant ? 'כמותי (20)' : 'מילולי (23)'}
-                                                            </span>
-                                                            <span className="font-black text-stone-800">{sec.correct}/{sec.total} ({sec.percentage}%)</span>
-                                                            {sec.mistakes > 0 && <span className="text-[10px] text-rose-500 font-bold">({sec.mistakes} טעויות)</span>}
-                                                        </div>
-                                                        <div className="flex items-center gap-1">
-                                                            {sec.mistakeReasons && sec.mistakeReasons.length > 0 && (
-                                                                <button onClick={() => setSelectedSectionForMistakes(sec)} className="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-bold" title="צפייה בתחקור">
-                                                                    תחקור 📝
-                                                                </button>
-                                                            )}
-                                                            <button onClick={() => handleDeleteSection(sec.id)} className="text-stone-400 hover:text-rose-600 p-1" title="מחיקה">✕</button>
-                                                        </div>
-                                                    </div>
-                                                );
-                                            })
-                                        )}
-                                    </div>
-                                </div>
-
-                                <button 
-                                    onClick={() => { setSecType('quantitative'); setIsSectionModalOpen(true); }}
-                                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-2xl text-xs md:text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-95">
-                                    <span>+</span> הזנת תוצאות פרק (ידני)
-                                </button>
-                            </div>
-
-                        </div>
-
-                        {/* ========================================================= */}
-                        {/* MODAL 1: ADD ESSAY */}
-                        {/* ========================================================= */}
-                        {isEssayModalOpen && (
-                            <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
-                                <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-[slideUp_0.3s_ease-out] pb-safe-bottom">
-                                    <div className="flex justify-between items-center mb-5">
-                                        <h3 className="font-bold text-xl text-stone-800 flex items-center gap-2">
-                                            <span className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center text-sm">✍️</span>
-                                            תיעוד מטלת כתיבה
-                                        </h3>
-                                        <button onClick={() => setIsEssayModalOpen(false)} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
-                                    </div>
-                                    <form onSubmit={handleSaveEssay} className="space-y-4">
-                                        <div>
-                                            <label className="text-xs font-bold text-stone-500 block mb-1">נושא החיבור / מקור</label>
-                                            <input 
-                                                type="text" 
-                                                required 
-                                                placeholder="למשל: הגבלת שימוש ברשתות חברתיות לנוער" 
-                                                value={essayTopic} 
-                                                onChange={e => setEssayTopic(e.target.value)}
-                                                className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-amber-400 outline-none"
-                                            />
-                                        </div>
-                                        <div className="grid grid-cols-2 gap-3">
-                                            <div>
-                                                <label className="text-xs font-bold text-stone-500 block mb-1">תאריך כתיבה</label>
-                                                <input 
-                                                    type="date" 
-                                                    value={essayDate} 
-                                                    onChange={e => setEssayDate(e.target.value)}
-                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-amber-400 outline-none"
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="text-xs font-bold text-stone-500 block mb-1">זמן שהוקדש</label>
-                                                <input 
-                                                    type="text" 
-                                                    readOnly 
-                                                    value="30 דקות בדיוק ⏱️" 
-                                                    className="w-full p-3 bg-stone-100 border border-stone-200 rounded-2xl text-sm font-bold text-stone-600 outline-none"
-                                                />
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <label className="text-xs font-bold text-stone-500 block mb-1">הערות / משוב עצמי (אופציונלי)</label>
-                                            <textarea 
-                                                rows="2"
-                                                placeholder="האם עמדתי בזמנים? שמירה על פסקת איזון? עושר לשוני..." 
-                                                value={essayNotes} 
-                                                onChange={e => setEssayNotes(e.target.value)}
-                                                className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-amber-400 outline-none"
-                                            ></textarea>
-                                        </div>
-                                        <div className="pt-2 flex gap-3">
-                                            <button 
-                                                type="button" 
-                                                onClick={() => setIsEssayModalOpen(false)}
-                                                className="flex-1 py-3 text-stone-500 font-bold bg-stone-100 rounded-2xl text-sm hover:bg-stone-200">
-                                                ביטול
-                                            </button>
-                                            <button 
-                                                type="submit" 
-                                                className="flex-1 py-3 text-white font-bold bg-amber-500 hover:bg-amber-600 rounded-2xl text-sm shadow-md shadow-amber-500/20">
-                                                שמירה לסטריק ✨ (+25 נק')
-                                            </button>
-                                        </div>
-                                    </form>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* ========================================================= */}
-                        {/* MODAL 2: ADD SECTION WITH MISTAKE ANALYSIS (Ideas 1 & 2) */}
-                        {/* ========================================================= */}
-                        {isSectionModalOpen && (
-                            <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
-                                <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-[slideUp_0.3s_ease-out] max-h-[90vh] overflow-y-auto custom-scrollbar pb-safe-bottom">
-                                    <div className="flex justify-between items-center mb-5">
-                                        <h3 className="font-bold text-xl text-stone-800 flex items-center gap-2">
-                                            <span className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-sm">⏱️</span>
-                                            הזנת תוצאות ותחקור פרק
-                                        </h3>
-                                        <button onClick={() => setIsSectionModalOpen(false)} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
-                                    </div>
-                                    <form onSubmit={handleSaveSection} className="space-y-4">
-                                        {/* Type Selector */}
-                                        <div>
-                                            <label className="text-xs font-bold text-stone-500 block mb-1">סוג הפרק</label>
-                                            <div className="grid grid-cols-2 gap-2 bg-stone-100 p-1.5 rounded-2xl">
-                                                <button 
-                                                    type="button" 
-                                                    onClick={() => setSecType('quantitative')}
-                                                    className={`py-2 rounded-xl text-xs font-bold transition-all ${
-                                                        secType === 'quantitative' ? 'bg-white text-indigo-700 shadow-xs' : 'text-stone-500'
-                                                    }`}>
-                                                    כמותי (מתוך 20)
-                                                </button>
-                                                <button 
-                                                    type="button" 
-                                                    onClick={() => setSecType('verbal')}
-                                                    className={`py-2 rounded-xl text-xs font-bold transition-all ${
-                                                        secType === 'verbal' ? 'bg-white text-purple-700 shadow-xs' : 'text-stone-500'
-                                                    }`}>
-                                                    מילולי (מתוך 23)
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        {/* Correct count */}
-                                        <div>
-                                            <label className="text-xs font-bold text-stone-500 block mb-1">
-                                                כמה תשובות נכונות צדקת? (מתוך {secType === 'quantitative' ? '20' : '23'})
-                                            </label>
-                                            <div className="flex items-center gap-3">
-                                                <input 
-                                                    type="number" 
-                                                    min="0" 
-                                                    max={secType === 'quantitative' ? 20 : 23} 
-                                                    required 
-                                                    placeholder="למשל 18"
-                                                    value={secCorrect} 
-                                                    onChange={e => setSecCorrect(e.target.value)}
-                                                    className="flex-1 p-3 bg-stone-50 border border-stone-200 rounded-2xl text-lg font-black text-center focus:border-indigo-400 outline-none"
-                                                />
-                                                <div className="text-sm font-black text-stone-500">
-                                                    מתוך {secType === 'quantitative' ? '20' : '23'}
-                                                </div>
-                                            </div>
-                                            {secCorrect !== '' && !isNaN(parseInt(secCorrect, 10)) && (
-                                                <div className="mt-1.5 text-xs font-bold text-indigo-600 text-center">
-                                                    דיוק: {Math.round((parseInt(secCorrect, 10) / (secType === 'quantitative' ? 20 : 23)) * 100)}% הצלחה! 🎯
-                                                    {parseInt(secCorrect, 10) < (secType === 'quantitative' ? 20 : 23) && (
-                                                        <span className="text-rose-500 mr-1.5">
-                                                            ({(secType === 'quantitative' ? 20 : 23) - parseInt(secCorrect, 10)} טעויות)
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Mistake Analysis Section (Idea 2) */}
-                                        {secCorrect !== '' && parseInt(secCorrect, 10) < (secType === 'quantitative' ? 20 : 23) && (
-                                            <div className="p-3.5 bg-rose-50/70 border border-rose-200/80 rounded-2xl space-y-2">
-                                                <div className="text-xs font-bold text-rose-900 flex items-center gap-1.5">
-                                                    <span>🔍</span> תחקור מהיר: ממה נבעו הטעויות?
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-1.5">
-                                                    {[
-                                                        { id: 'careless', label: '🤦‍♀️ חוסר תשומת לב / מלכודת' },
-                                                        { id: 'time', label: '⏰ ניהול זמן / היתקעות' },
-                                                        { id: 'gap', label: '❌ חוסר ידע / חומר' },
-                                                        { id: 'guess', label: '🎲 ניחוש' }
-                                                    ].map(opt => (
-                                                        <button 
-                                                            key={opt.id}
-                                                            type="button" 
-                                                            onClick={() => toggleMistakeReason(opt.id)}
-                                                            className={`p-2 rounded-xl text-[11px] font-bold text-right transition-all border ${
-                                                                secMistakeReasons.includes(opt.id) 
-                                                                    ? 'bg-rose-500 text-white border-rose-500 shadow-xs' 
-                                                                    : 'bg-white text-stone-700 border-stone-200 hover:border-rose-300'
-                                                            }`}>
-                                                            {opt.label}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                                <div>
-                                                    <input 
-                                                        type="text" 
-                                                        placeholder="הערת תחקור (מה לעשות פעם הבאה...)" 
-                                                        value={secMistakeNote} 
-                                                        onChange={e => setSecMistakeNote(e.target.value)}
-                                                        className="w-full p-2.5 bg-white border border-stone-200 rounded-xl text-xs font-medium outline-none focus:border-rose-400"
-                                                    />
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        <div className="grid grid-cols-2 gap-3">
-                                            <div>
-                                                <label className="text-xs font-bold text-stone-500 block mb-1">זמן (דקות)</label>
-                                                <input 
-                                                    type="number" 
-                                                    value={secTime} 
-                                                    onChange={e => setSecTime(e.target.value)}
-                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-indigo-400 outline-none"
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="text-xs font-bold text-stone-500 block mb-1">תאריך פתירה</label>
-                                                <input 
-                                                    type="date" 
-                                                    value={secDate} 
-                                                    onChange={e => setSecDate(e.target.value)}
-                                                    className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-indigo-400 outline-none"
-                                                />
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <label className="text-xs font-bold text-stone-500 block mb-1">מקור הפרק / מועד (אופציונלי)</label>
-                                            <input 
-                                                type="text" 
-                                                placeholder="למשל: סימולציה 3 פרק 1, מועד סתיו 2025" 
-                                                value={secSource} 
-                                                onChange={e => setSecSource(e.target.value)}
-                                                className="w-full p-3 bg-stone-50 border border-stone-200 rounded-2xl text-sm font-medium focus:border-indigo-400 outline-none"
-                                            />
-                                        </div>
-
-                                        <div className="pt-2 flex gap-3">
-                                            <button 
-                                                type="button" 
-                                                onClick={() => setIsSectionModalOpen(false)}
-                                                className="flex-1 py-3 text-stone-500 font-bold bg-stone-100 rounded-2xl text-sm hover:bg-stone-200">
-                                                ביטול
-                                            </button>
-                                            <button 
-                                                type="submit" 
-                                                className="flex-1 py-3 text-white font-bold bg-indigo-600 hover:bg-indigo-700 rounded-2xl text-sm shadow-md shadow-indigo-600/20">
-                                                שמירה לסטריק ✨ (+20 נק')
-                                            </button>
-                                        </div>
-                                    </form>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* ========================================================= */}
-                        {/* MODAL 3: VIEW MISTAKE DETAILS */}
-                        {/* ========================================================= */}
-                        {selectedSectionForMistakes && (
-                            <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex items-end md:items-center justify-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
-                                <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 shadow-2xl animate-[slideUp_0.3s_ease-out] pb-safe-bottom">
-                                    <div className="flex justify-between items-center mb-4">
-                                        <h3 className="font-bold text-lg text-stone-800 flex items-center gap-2">
-                                            <span>📝</span> תחקור פרק: {selectedSectionForMistakes.source || 'ללא שם'}
-                                        </h3>
-                                        <button onClick={() => setSelectedSectionForMistakes(null)} className="text-stone-400 hover:text-stone-600 bg-stone-100 p-2 rounded-full">✕</button>
-                                    </div>
-                                    <div className="space-y-3 text-sm">
-                                        <div className="p-3 bg-stone-50 rounded-2xl flex justify-between items-center">
-                                            <span className="font-bold text-stone-600">תוצאה:</span>
-                                            <span className="font-black text-indigo-700">{selectedSectionForMistakes.correct}/{selectedSectionForMistakes.total} ({selectedSectionForMistakes.percentage}%)</span>
-                                        </div>
-                                        <div className="p-3 bg-stone-50 rounded-2xl flex justify-between items-center">
-                                            <span className="font-bold text-stone-600">טעויות:</span>
-                                            <span className="font-black text-rose-600">{selectedSectionForMistakes.mistakes} טעויות</span>
-                                        </div>
-                                        {selectedSectionForMistakes.mistakeReasons && selectedSectionForMistakes.mistakeReasons.length > 0 && (
-                                            <div>
-                                                <div className="text-xs font-bold text-stone-500 mb-1.5">סיבות לטעויות:</div>
-                                                <div className="flex gap-1.5 flex-wrap">
-                                                    {selectedSectionForMistakes.mistakeReasons.map(r => (
-                                                        <span key={r} className="px-2.5 py-1 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold">
-                                                            {r === 'careless' ? '🤦‍♀️ חוסר תשומת לב' : r === 'time' ? '⏰ ניהול זמן' : r === 'gap' ? '❌ פער בחומר' : '🎲 ניחוש'}
-                                                        </span>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                        {selectedSectionForMistakes.mistakeNote && (
-                                            <div className="p-3 bg-amber-50/60 rounded-2xl border border-amber-200 text-xs text-stone-700">
-                                                <div className="font-bold text-amber-900 mb-0.5">מסקנות מהתחקור:</div>
-                                                <div>{selectedSectionForMistakes.mistakeNote}</div>
-                                            </div>
-                                        )}
-                                        <button onClick={() => setSelectedSectionForMistakes(null)} className="w-full py-3 bg-stone-800 text-white rounded-2xl font-bold text-xs mt-3">
-                                            סגור תחקור
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                );
-            };
-
-
             return (
                 <div className="min-h-screen flex flex-col md:flex-row pb-24 md:pb-0 no-print" dir="rtl">
+                    {renderFeedbackModal()}
                     
                     {toastMessage && (
                         <div className="fixed top-safe-top left-1/2 -translate-x-1/2 mt-4 z-[80] max-w-sm w-11/12 animate-[bounce_0.5s_ease-out]">
@@ -6248,13 +5677,16 @@ function App() {
                         <Navigation />
                         
                         <div className="mt-auto pt-6">
-                            <button onClick={() => { setTaskFormType('hw'); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="w-full py-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-2xl font-bold shadow-md shadow-purple-500/20 flex items-center justify-center gap-2 text-sm transition-all active:scale-95">
+                            <button onClick={() => { setTaskFormType('hw'); setShowPastTopics(false); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="w-full py-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-2xl font-bold shadow-md shadow-purple-500/20 flex items-center justify-center gap-2 text-sm transition-all active:scale-95">
                                 <IconPlus className="w-4 h-4" /> הוספת שיעור/משימה
                             </button>
-                            <button onClick={() => { setTaskFormType('practice'); setPracticeDoneNow(true); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="w-full mt-2 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-2xl font-bold shadow-sm shadow-amber-500/20 flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
+                            <button onClick={() => { setTaskFormType('practice'); setShowPastTopics(false); setPracticeDoneNow(true); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="w-full mt-2 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-2xl font-bold shadow-sm shadow-amber-500/20 flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
                                 <span>💡</span> סשן תרגול מהיר (+נקודות)
                             </button>
-                            <button onClick={handleLogout} className="w-full mt-3 py-3 text-sm text-stone-500 hover:text-rose-600 font-semibold bg-stone-50 hover:bg-rose-50 rounded-2xl transition-colors flex items-center justify-center gap-2 active:scale-95">
+                            <button onClick={() => setIsFeedbackModalOpen(true)} className="w-full mt-2 py-2.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200/80 rounded-2xl font-bold flex items-center justify-center gap-2 text-xs transition-all active:scale-95">
+                                <span>💬</span> דיווח על תקלה / בקשה
+                            </button>
+                            <button onClick={handleLogout} className="w-full mt-2 py-3 text-sm text-stone-500 hover:text-rose-600 font-semibold bg-stone-50 hover:bg-rose-50 rounded-2xl transition-colors flex items-center justify-center gap-2 active:scale-95">
                                 התנתקות
                             </button>
                         </div>
@@ -6266,7 +5698,14 @@ function App() {
                             <div className="w-8 h-8 bg-gradient-to-br from-purple-100 to-rose-100 rounded-lg flex items-center justify-center text-sm shadow-sm">✨</div>
                             <div className="font-bold text-lg text-stone-800 tracking-tight">StudyStreak</div>
                         </div>
-                        <div className="flex gap-2 items-center">
+                        <div className="flex gap-1.5 items-center">
+                            <button 
+                                onClick={() => setIsFeedbackModalOpen(true)}
+                                className="bg-indigo-50 text-indigo-700 border border-indigo-200 px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 active:scale-95"
+                                title="דיווח על תקלה / בקשה לאפליקציה">
+                                <span>💬</span>
+                                <span className="text-[10px]">פנייה</span>
+                            </button>
                             <button 
                                 onClick={() => setIsSyncDiagnosticsOpen(true)}
                                 className={`text-[10px] px-2.5 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1 active:scale-95 cursor-pointer ${
@@ -6308,64 +5747,8 @@ function App() {
 
                     <main className="flex-1 w-full max-w-5xl mx-auto p-4 md:p-6 lg:p-8 relative z-10">
                         
-                        {/* Mode Switcher Banner */}
-                        <div className="flex items-center justify-between flex-wrap gap-3 mb-6 bg-white/90 backdrop-blur-md p-2 rounded-3xl border border-stone-200/80 shadow-xs no-print">
-                            <div className="flex items-center gap-1.5 p-1 bg-stone-100/90 rounded-2xl w-full sm:w-auto">
-                                <button
-                                    onClick={() => { setStudyMode('school'); try { localStorage.setItem('studyStreak_mode', 'school'); } catch(e){} }}
-                                    className={`flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${
-                                        studyMode === 'school' ? 'bg-white text-purple-700 shadow-xs' : 'text-stone-500 hover:text-stone-800'
-                                    }`}>
-                                    <span>📚</span>
-                                    <span>לימודים ובגרויות</span>
-                                </button>
-                                <button
-                                    onClick={() => { setStudyMode('psychometry'); try { localStorage.setItem('studyStreak_mode', 'psychometry'); } catch(e){} }}
-                                    className={`flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${
-                                        studyMode === 'psychometry' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/20' : 'text-stone-500 hover:text-stone-800'
-                                    }`}>
-                                    <span>🎯</span>
-                                    <span>מצב פסיכומטרי</span>
-                                </button>
-                                <button
-                                    onClick={() => { setStudyMode('all'); try { localStorage.setItem('studyStreak_mode', 'all'); } catch(e){} }}
-                                    className={`flex-1 sm:flex-initial px-3 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center justify-center gap-1.5 active:scale-95 ${
-                                        studyMode === 'all' ? 'bg-white text-stone-800 shadow-xs' : 'text-stone-500 hover:text-stone-800'
-                                    }`}>
-                                    <span>🌐</span>
-                                    <span>הכל</span>
-                                </button>
-                            </div>
-                            {studyMode === 'psychometry' && (
-                                <div className="hidden sm:flex items-center gap-2 text-xs font-bold text-indigo-700 bg-indigo-50/80 px-3.5 py-2 rounded-2xl border border-indigo-100">
-                                    <span>⚡</span>
-                                    <span>פסיכומטרי דו-תחומי בלבד: כמותי + מילולי (החיבור 25% מהמילולי)</span>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Psychometry Section: In Psychometry Mode */}
-                        {studyMode === 'psychometry' && activeTab === 'dashboard' && (
-                            <PsychometrySection 
-                                activeUserData={activeUserData} 
-                                updateUserData={updateUserData} 
-                                showToast={showToast} 
-                            />
-                        )}
-
-                        {/* Psychometry Section: In All Mode */}
-                        {studyMode === 'all' && activeTab === 'dashboard' && (
-                            <div className="mb-8">
-                                <PsychometrySection 
-                                    activeUserData={activeUserData} 
-                                    updateUserData={updateUserData} 
-                                    showToast={showToast} 
-                                />
-                            </div>
-                        )}
-
                         {}
-                        {activeTab === 'dashboard' && studyMode !== 'psychometry' && (
+                        {activeTab === 'dashboard' && (
                             <div className="space-y-6 animate-[fadeIn_0.3s_ease-out]">
                                 <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                                     <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors group flex flex-col justify-between active:scale-95" onClick={() => toggleModal('streakHistory', true)}>
@@ -6377,14 +5760,14 @@ function App() {
                                             <div className="text-3xl font-bold text-stone-800">{activeUserData.taskStreak}</div>
                                         </div>
                                     </div>
-                                    <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors active:scale-95" onClick={() => toggleModal('pointsHistory', true)}>
+                                    <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors active:scale-95" onClick={() => { setPointsHistoryFilter('weekly'); toggleModal('pointsHistory', true); }}>
                                         <div className="text-stone-400 text-xs font-semibold mb-2">נקודות השבוע</div>
                                         <div className="text-3xl font-bold text-purple-600 text-right" dir="ltr">{activeUserData.weeklyPoints}</div>
                                         {(() => {
                                             const now = new Date();
                                             const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-                                            const sevenDaysAgo = new Date();
-                                            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                                            const startOfWeekSunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay(), 0, 0, 0, 0);
+                                            const startOfWeekStr = `${startOfWeekSunday.getFullYear()}-${String(startOfWeekSunday.getMonth() + 1).padStart(2, '0')}-${String(startOfWeekSunday.getDate()).padStart(2, '0')}`;
                                             
                                             let weekHours = 0;
                                             let todayHours = 0;
@@ -6400,14 +5783,16 @@ function App() {
                                                 if (t.completedAt) {
                                                     const cd = new Date(t.completedAt);
                                                     if (!isNaN(cd.getTime())) {
-                                                        if (cd >= sevenDaysAgo) isWeek = true;
+                                                        if (cd >= startOfWeekSunday) isWeek = true;
                                                         const cdStr = `${cd.getFullYear()}-${String(cd.getMonth() + 1).padStart(2, '0')}-${String(cd.getDate()).padStart(2, '0')}`;
                                                         if (cdStr === todayStr) isToday = true;
                                                     }
                                                 } else if (t.dueDate) {
                                                     if (t.dueDate === todayStr) isToday = true;
-                                                    const dd = new Date(t.dueDate);
-                                                    if (!isNaN(dd.getTime()) && dd >= sevenDaysAgo) isWeek = true;
+                                                    if (t.dueDate >= startOfWeekStr && t.dueDate <= todayStr) isWeek = true;
+                                                } else if (t.givenDate) {
+                                                    if (t.givenDate === todayStr) isToday = true;
+                                                    if (t.givenDate >= startOfWeekStr && t.givenDate <= todayStr) isWeek = true;
                                                 }
                                                 
                                                 if (isWeek) weekHours += hours;
@@ -6431,7 +5816,7 @@ function App() {
                                             return null;
                                         })()}
                                     </div>
-                                    <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors active:scale-95" onClick={() => toggleModal('pointsHistory', true)}>
+                                    <div className="bg-white p-5 rounded-3xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-stone-100 cursor-pointer hover:border-purple-200 transition-colors active:scale-95" onClick={() => { setPointsHistoryFilter('all'); toggleModal('pointsHistory', true); }}>
                                         <div className="text-stone-400 text-xs font-semibold mb-2">סה"כ נקודות</div>
                                         <div className="text-3xl font-bold text-emerald-600 text-right" dir="ltr">{activeUserData.totalPoints}</div>
                                     </div>
@@ -6532,7 +5917,7 @@ function App() {
                                                             </div>
                                                         </div>
                                                         <div className="font-bold text-stone-800 text-base">{task.title}</div>
-                                                        {task.lessonTopic && <div className="text-sm text-stone-500 mt-1">{task.lessonTopic}</div>}
+                                                        {task.lessonTopic && task.lessonTopic.trim() !== '' && task.lessonTopic.trim() !== (task.title || '').trim() && `תרגול: ${task.lessonTopic.trim()}` !== (task.title || '').trim() && <div className="text-sm text-stone-500 mt-1">{task.lessonTopic}</div>}
                                                     </div>
                                                     <div className="flex gap-2 w-full mt-1 items-center">
                                                         <button onClick={() => handleOpenCompleteModal(task)} className={`flex-1 border px-4 py-3 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-2 active:scale-95 shadow-xs ${isLate ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200'}`}>
@@ -6588,10 +5973,10 @@ function App() {
                                         <p className="text-sm text-stone-500 mt-1">מסודרות לפי רמת הדחיפות.</p>
                                     </div>
                                     <div className="flex items-center gap-2.5 flex-wrap">
-                                        <button onClick={() => { setTaskFormType('practice'); setPracticeDoneNow(true); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 px-4 py-3 rounded-2xl text-sm font-bold shadow-xs transition-colors flex items-center justify-center gap-2 active:scale-95">
+                                        <button onClick={() => { setTaskFormType('practice'); setShowPastTopics(false); setPracticeDoneNow(true); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 px-4 py-3 rounded-2xl text-sm font-bold shadow-xs transition-colors flex items-center justify-center gap-2 active:scale-95">
                                             <span>💡</span> סשן תרגול
                                         </button>
-                                        <button onClick={() => { setTaskFormType('hw'); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="bg-stone-800 text-white px-5 py-3 rounded-2xl text-sm font-bold shadow-md hover:bg-stone-900 transition-colors flex items-center justify-center gap-2 active:scale-95">
+                                        <button onClick={() => { setTaskFormType('hw'); setShowPastTopics(false); setTaskGivenDate(new Date().toISOString().split('T')[0]); toggleModal('task', true); }} className="bg-stone-800 text-white px-5 py-3 rounded-2xl text-sm font-bold shadow-md hover:bg-stone-900 transition-colors flex items-center justify-center gap-2 active:scale-95">
                                             <IconPlus className="w-4 h-4"/> הוספת חדש
                                         </button>
                                     </div>
@@ -6713,7 +6098,9 @@ function App() {
                                                             )}
                                                         </div>
                                                         <h3 className={`font-bold text-lg ${isTaskDone ? 'line-through text-stone-400' : 'text-stone-800'}`}>{task.title}</h3>
-                                                        <div className="text-sm text-stone-500 mt-1 font-medium">{task.lessonTopic && `נושא: ${task.lessonTopic}`}</div>
+                                                        {task.lessonTopic && task.lessonTopic.trim() !== '' && task.lessonTopic.trim() !== (task.title || '').trim() && `תרגול: ${task.lessonTopic.trim()}` !== (task.title || '').trim() && (
+                                                            <div className="text-sm text-stone-500 mt-1 font-medium">נושא: {task.lessonTopic}</div>
+                                                        )}
                                                         
                                                         {isTaskDone && !task.isLessonLog && !task.givenUp && (
                                                             <div className="mt-4 text-xs space-y-2 border-t border-stone-200/50 pt-3 flex flex-wrap gap-2">
@@ -6832,103 +6219,159 @@ function App() {
                                     )}
 
 
-                                    <div className="grid grid-cols-1 gap-4">
-                                        {filteredLogs.map(task => {
-                                            const sub = activeUserData.subjects.find(s => s.id === task.subjectId);
+                                    {(() => {
+                                        // Group tasks by (subjectId + topic) so selecting a past topic adds a task under the same topic rather than a new duplicate topic entry
+                                        const topicGroupsMap = new Map();
+                                        filteredLogs.forEach(task => {
+                                            const topicName = (task.lessonTopic || '').trim();
+                                            if (!topicName) return;
+                                            const key = (task.subjectId || 'all') + '___' + topicName.toLowerCase();
+                                            if (!topicGroupsMap.has(key)) {
+                                                topicGroupsMap.set(key, {
+                                                    key,
+                                                    topic: topicName,
+                                                    subjectId: task.subjectId,
+                                                    firstDate: task.givenDate || task.createdAt,
+                                                    primaryTask: task,
+                                                    tasks: []
+                                                });
+                                            }
+                                            const group = topicGroupsMap.get(key);
+                                            group.tasks.push(task);
+                                            if (task.givenDate && (!group.firstDate || task.givenDate < group.firstDate)) {
+                                                group.firstDate = task.givenDate;
+                                            }
+                                        });
+
+                                        const topicGroups = Array.from(topicGroupsMap.values())
+                                            .sort((a, b) => (b.firstDate || '').localeCompare(a.firstDate || ''));
+
+                                        if (topicGroups.length === 0) {
                                             return (
-                                                <div key={task.id} className="p-4 rounded-3xl border border-stone-100 bg-white shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] hover:shadow-md transition-all flex flex-col md:flex-row md:items-center justify-between gap-4">
-                                                    <div className="flex-1">
-                                                        <div className="flex items-center gap-2 mb-3 flex-wrap">
-                                                            <span className="text-xs px-2 py-1 rounded-lg font-bold shadow-sm" style={{backgroundColor: sub?.color || '#f5f5f4', color: sub ? '#fff' : '#57534e'}}>
-                                                                {sub?.emoji} {sub?.name || 'כללי'}
-                                                            </span>
-                                                            <span className="text-xs font-medium text-stone-500 bg-stone-50 px-2 py-1 rounded-lg border border-stone-100">
-                                                                נלמד ב: <span dir="ltr">{new Date(task.givenDate || task.createdAt).toLocaleDateString('he-IL')}</span>
-                                                            </span>
-                                                            {task.isLessonLog && (
-                                                                <span className="text-[10px] font-bold text-purple-600 bg-purple-50 px-2 py-1 rounded-lg border border-purple-100">
-                                                                    (סומן ללא שיעורי בית)
-                                                                </span>
-                                                            )}
-                                                            {(() => {
-                                                                const allAtts = task.attachments || [];
-                                                                const boardAtts = allAtts.filter(a => a.category === 'board' || (!a.category && task.isLessonLog));
-                                                                const hwAtts = allAtts.filter(a => a.category === 'homework' || (!a.category && !task.isLessonLog));
-
-                                                                return (
-                                                                    <>
-                                                                        {boardAtts.length > 0 && (
-                                                                            <button 
-                                                                                type="button"
-                                                                                onClick={() => openAttachmentViewer(task, 0, 'board')} 
-                                                                                className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                                                                                title="צפייה בצילומי לוח מהשיעור"
-                                                                            >
-                                                                                <span>📸</span> צילומי לוח ({boardAtts.length})
-                                                                            </button>
-                                                                        )}
-                                                                        {hwAtts.length > 0 && (
-                                                                            <button 
-                                                                                type="button"
-                                                                                onClick={() => openAttachmentViewer(task, 0, 'homework')} 
-                                                                                className="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg border border-indigo-200 flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                                                                                title="צפייה בקובצי שיעורי הבית של השיעור"
-                                                                            >
-                                                                                <span>📄</span> קובצי ש.ב ({hwAtts.length})
-                                                                            </button>
-                                                                        )}
-                                                                    </>
-                                                                );
-                                                            })()}
-                                                        </div>
-                                                        <h3 className="font-bold text-lg text-stone-800">{task.lessonTopic}</h3>
-                                                        {!task.isLessonLog && <div className="text-sm text-stone-500 mt-1">מתוך משימה: {task.title}</div>}
-                                                    </div>
-                                                    <div className="flex gap-2 shrink-0 border-t md:border-t-0 md:border-r border-stone-100 pt-3 md:pt-0 md:pr-4 items-center flex-wrap">
-                                                        <label className="bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 px-3 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-bold w-full md:w-auto active:scale-95 cursor-pointer shadow-xs" title="הוספת צילום לוח מהשיעור">
-                                                            <input 
-                                                                type="file" 
-                                                                multiple 
-                                                                accept="image/*" 
-                                                                className="hidden" 
-                                                                onChange={async (e) => {
-                                                                    const files = Array.from(e.target.files || []);
-                                                                    if (files.length === 0) return;
-                                                                    await handleQuickAddAttachmentsToTask(task, files, 'board');
-                                                                    e.target.value = '';
-                                                                }} 
-                                                            />
-                                                            <span>📸</span> + צילום לוח
-                                                        </label>
-                                                        
-                                                        {!task.isLessonLog && (
-                                                            <label className="bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 px-3 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-bold w-full md:w-auto active:scale-95 cursor-pointer shadow-xs" title="הוספת דף עבודה או קובץ שיעורי בית">
-                                                                <input 
-                                                                    type="file" 
-                                                                    multiple 
-                                                                    accept="image/*,application/pdf" 
-                                                                    className="hidden" 
-                                                                    onChange={async (e) => {
-                                                                        const files = Array.from(e.target.files || []);
-                                                                        if (files.length === 0) return;
-                                                                        await handleQuickAddAttachmentsToTask(task, files, 'homework');
-                                                                        e.target.value = '';
-                                                                    }} 
-                                                                />
-                                                                <span>📄</span> + דף ש.ב
-                                                            </label>
-                                                        )}
-
-                                                        <button onClick={() => handleRemoveFromLessonLog(task.id)} className="bg-stone-50 text-stone-400 hover:text-rose-600 border border-stone-200 hover:border-rose-200 px-2.5 py-2 rounded-xl hover:bg-rose-50 transition-colors flex items-center justify-center gap-1 text-xs font-medium w-full md:w-auto active:scale-95" title="מחיקה מהיומן">
-                                                            <IconTrash className="w-4 h-4"/>
-                                                        </button>
-                                                    </div>
+                                                <div className="text-stone-400 text-base font-medium text-center py-16 bg-white rounded-3xl border border-stone-200 border-dashed">
+                                                    יומן השיעורים ריק. תעדי שיעור חדש!
                                                 </div>
-                                            )
-                                        })}
-                                        {filteredLogs.length === 0 && <div className="text-stone-400 text-base font-medium text-center py-16 bg-white rounded-3xl border border-stone-200 border-dashed">יומן השיעורים ריק. תעדי שיעור חדש!</div>}
-                                    </div>
-                                </div>
+                                            );
+                                        }
+
+                                        return (
+                                            <div className="grid grid-cols-1 gap-4">
+                                                {topicGroups.map(group => {
+                                                    const sub = activeUserData.subjects.find(s => s.id === group.subjectId);
+                                                    
+                                                    // Gather all unique attachments for this topic
+                                                    const allGroupAtts = [];
+                                                    const seenAttIds = new Set();
+                                                    group.tasks.forEach(t => {
+                                                        (t.attachments || []).forEach(a => {
+                                                            const aid = a.id || a.name;
+                                                            if (!seenAttIds.has(aid)) {
+                                                                seenAttIds.add(aid);
+                                                                allGroupAtts.push(a);
+                                                            }
+                                                        });
+                                                    });
+                                                    const boardAtts = allGroupAtts.filter(a => a.category === 'board');
+                                                    const hwAtts = allGroupAtts.filter(a => a.category === 'homework');
+                                                    const relatedWorkTasks = group.tasks.filter(t => !t.isLessonLog);
+
+                                                    return (
+                                                        <div key={group.key} className="p-5 rounded-3xl border border-stone-100 bg-white shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] hover:shadow-md transition-all flex flex-col md:flex-row md:items-start justify-between gap-4">
+                                                            <div className="flex-1">
+                                                                <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                                                    <span className="text-xs px-2.5 py-1 rounded-lg font-bold shadow-xs" style={{backgroundColor: sub?.color || '#f5f5f4', color: sub ? '#fff' : '#57534e'}}>
+                                                                        {sub?.emoji} {sub?.name || 'כללי'}
+                                                                    </span>
+                                                                    <span className="text-xs font-medium text-stone-500 bg-stone-50 px-2 py-1 rounded-lg border border-stone-100">
+                                                                        נלמד ב: <span dir="ltr">{new Date(group.firstDate).toLocaleDateString('he-IL')}</span>
+                                                                    </span>
+                                                                    {relatedWorkTasks.length > 0 && (
+                                                                        <span className="text-[11px] font-bold text-purple-700 bg-purple-50 px-2.5 py-0.5 rounded-full border border-purple-200">
+                                                                            {relatedWorkTasks.length} {relatedWorkTasks.length === 1 ? 'משימה משויכת' : 'משימות משויכות'}
+                                                                        </span>
+                                                                    )}
+                                                                    {boardAtts.length > 0 && (
+                                                                        <button 
+                                                                            type="button" 
+                                                                            onClick={() => openAttachmentViewer(group.primaryTask, 0, 'board')} 
+                                                                            className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                                                                            title="צפייה בצילומי לוח מהשיעור"
+                                                                        >
+                                                                            <span>📸</span> צילומי לוח ({boardAtts.length})
+                                                                        </button>
+                                                                    )}
+                                                                    {hwAtts.length > 0 && (
+                                                                        <button 
+                                                                            type="button" 
+                                                                            onClick={() => openAttachmentViewer(group.primaryTask, 0, 'homework')} 
+                                                                            className="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg border border-indigo-200 flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                                                                            title="צפייה בקובצי שיעורי הבית של השיעור"
+                                                                        >
+                                                                            <span>📄</span> קובצי ש.ב ({hwAtts.length})
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+
+                                                                <h3 className="font-extrabold text-xl text-stone-800 tracking-tight">{group.topic}</h3>
+
+                                                                {relatedWorkTasks.length > 0 && (
+                                                                    <div className="mt-3 space-y-1.5">
+                                                                        {relatedWorkTasks.map(t => (
+                                                                            <div key={t.id} className="flex items-center justify-between text-xs bg-stone-50/80 p-2 rounded-xl border border-stone-100 gap-2">
+                                                                                <div className="flex items-center gap-2 truncate">
+                                                                                    <span>{t.isPracticeSession ? '💡' : '📝'}</span>
+                                                                                    <span className={`font-semibold truncate ${t.completed ? 'line-through text-stone-400' : 'text-stone-800'}`}>
+                                                                                        {t.title}
+                                                                                    </span>
+                                                                                </div>
+                                                                                <span className={`text-[10px] font-bold shrink-0 px-2 py-0.5 rounded-lg border ${t.completed ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-800 border-amber-200'}`}>
+                                                                                    {t.completed ? '✅ הושלם' : (t.isPracticeSession ? '⏳ תרגול גמיש' : '⏳ להגשה')}
+                                                                                </span>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+
+                                                            <div className="flex gap-2 shrink-0 border-t md:border-t-0 md:border-r border-stone-100 pt-3 md:pt-0 md:pr-4 items-center flex-wrap">
+                                                                <label className="bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 px-3 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-bold w-full md:w-auto active:scale-95 cursor-pointer shadow-xs" title="הוספת צילום לוח לנושא זה">
+                                                                    <input 
+                                                                        type="file" 
+                                                                        multiple 
+                                                                        accept="image/*" 
+                                                                        className="hidden" 
+                                                                        onChange={async (e) => {
+                                                                            const files = Array.from(e.target.files || []);
+                                                                            if (files.length === 0) return;
+                                                                            await handleQuickAddAttachmentsToTask(group.primaryTask, files, 'board');
+                                                                            e.target.value = '';
+                                                                        }} 
+                                                                    />
+                                                                    <span>📸</span> + צילום לוח
+                                                                </label>
+                                                                <button 
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        if (window.confirm(`האם את בטוחה שברצונך להסיר את הנושא "${group.topic}" מהיומן?`)) {
+                                                                            updateUserData(prev => ({
+                                                                                ...prev,
+                                                                                tasks: prev.tasks.map(t => group.tasks.some(gt => gt.id === t.id) ? { ...t, lessonTopic: '' } : t)
+                                                                            }));
+                                                                            showToast('נושא השיעור הוסר מהיומן', 'success');
+                                                                        }
+                                                                    }}
+                                                                    className="text-stone-400 hover:text-rose-600 bg-stone-50 hover:bg-rose-50 border border-stone-200 hover:border-rose-200 p-2 rounded-xl transition-all active:scale-95 text-xs"
+                                                                    title="הסרת נושא זה מהיומן"
+                                                                >
+                                                                    <IconTrash className="w-4 h-4" />
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        );
+                                    })()}                                </div>
                             );
                         })()}
 
@@ -7335,34 +6778,34 @@ function App() {
                             return (
                             <div className="space-y-6 max-w-4xl mx-auto animate-[fadeIn_0.3s_ease-out]">
                                 
-                                <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] relative overflow-hidden group">
+                                <div className="bg-white p-5 sm:p-6 rounded-3xl border border-stone-100 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.03)] relative overflow-hidden group">
                                     <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-50 rounded-full blur-3xl -mr-20 -mt-20 pointer-events-none transition-transform group-hover:scale-110"></div>
-                                    <div className="flex flex-col md:flex-row justify-between md:items-end gap-6 relative z-10">
+                                    <div className="flex flex-col md:flex-row justify-between md:items-end gap-4 relative z-10">
                                         <div>
                                             <h2 className="text-2xl font-bold text-stone-800 tracking-tight flex items-center gap-2">
-                                                <span>🗓️</span> ניהול והכנה למבחנים
+                                                <span>🗓️</span> מבחנים
                                             </h2>
-                                            <p className="text-sm text-stone-500 mt-2 max-w-xl leading-relaxed">
-                                                תכנון למידה מרוכז לקראת מבחנים קרובים, וארכיון הישגים וציונים מסודר לכל המבחנים שכבר התקיימו.
+                                            <p className="text-xs sm:text-sm text-stone-500 mt-1 max-w-xl leading-relaxed">
+                                                תצוגה מרוכזת ונוחה של כל המבחנים — לחצי על כל מבחן כדי לפתוח או לסגור את פירוט הסשנים והפעולות.
                                             </p>
                                         </div>
-                                        <div className="flex flex-col sm:flex-row gap-3 shrink-0">
-                                            <button onClick={() => toggleModal('quickExam', true)} className="bg-white text-indigo-600 px-6 py-4 rounded-2xl text-sm font-bold shadow-sm border border-indigo-100 hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 active:scale-95">
-                                                <IconPlus className="w-4 h-4"/> הוספה מהירה (ללא לו"ז)
+                                        <div className="flex flex-row gap-2.5 shrink-0">
+                                            <button onClick={() => toggleModal('quickExam', true)} className="flex-1 sm:flex-initial bg-white text-indigo-600 px-4 py-3 rounded-2xl text-xs sm:text-sm font-bold shadow-sm border border-indigo-100 hover:bg-indigo-50 transition-all flex items-center justify-center gap-1.5 active:scale-95">
+                                                <IconPlus className="w-4 h-4"/> הוספה מהירה
                                             </button>
-                                            <button onClick={() => toggleModal('examPlanner', true)} className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-6 py-4 rounded-2xl text-sm font-bold shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 active:scale-95">
-                                                <IconSparkle className="w-4 h-4"/> תכנון למידה חכם
+                                            <button onClick={() => toggleModal('examPlanner', true)} className="flex-1 sm:flex-initial bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-4 py-3 rounded-2xl text-xs sm:text-sm font-bold shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-1.5 active:scale-95">
+                                                <IconSparkle className="w-4 h-4"/> תכנון חכם
                                             </button>
                                         </div>
                                     </div>
 
                                     {/* Segmented Sub-Tab Switcher for Upcoming vs Past Exams */}
-                                    <div className="mt-6 pt-5 border-t border-stone-100 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 relative z-10">
-                                        <div className="flex bg-stone-100 p-1.5 rounded-2xl border border-stone-200 gap-1.5 w-full sm:w-auto">
+                                    <div className="mt-5 pt-4 border-t border-stone-100 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 relative z-10">
+                                        <div className="flex bg-stone-100 p-1 rounded-2xl border border-stone-200 gap-1 w-full sm:w-auto">
                                             <button 
                                                 type="button" 
                                                 onClick={() => setExamViewTab('upcoming')}
-                                                className={`flex-1 sm:flex-initial px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${examViewTab === 'upcoming' ? 'bg-white text-indigo-700 shadow-sm border border-stone-200/60' : 'text-stone-600 hover:text-stone-900'}`}
+                                                className={`flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${examViewTab === 'upcoming' ? 'bg-white text-indigo-700 shadow-sm border border-stone-200/60' : 'text-stone-600 hover:text-stone-900'}`}
                                             >
                                                 <span>🗓️</span> מבחנים קרובים
                                                 <span className={`text-[11px] px-2 py-0.5 rounded-full font-black ${examViewTab === 'upcoming' ? 'bg-indigo-100 text-indigo-700' : 'bg-stone-200 text-stone-600'}`}>
@@ -7372,142 +6815,167 @@ function App() {
                                             <button 
                                                 type="button" 
                                                 onClick={() => setExamViewTab('past')}
-                                                className={`flex-1 sm:flex-initial px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${examViewTab === 'past' ? 'bg-white text-purple-700 shadow-sm border border-stone-200/60' : 'text-stone-600 hover:text-stone-900'}`}
+                                                className={`flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-95 ${examViewTab === 'past' ? 'bg-white text-purple-700 shadow-sm border border-stone-200/60' : 'text-stone-600 hover:text-stone-900'}`}
                                             >
-                                                <span>📜</span> מבחנים שהתקיימו (ארכיון)
+                                                <span>📜</span> ארכיון וציונים
                                                 <span className={`text-[11px] px-2 py-0.5 rounded-full font-black ${examViewTab === 'past' ? 'bg-purple-100 text-purple-700' : 'bg-stone-200 text-stone-600'}`}>
                                                     {pastExams.length}
                                                 </span>
                                             </button>
                                         </div>
                                         {examViewTab === 'upcoming' && upcomingExams.length > 0 && (
-                                            <div className="text-xs text-stone-400 font-medium text-right sm:text-left">
-                                                ממוין לפי תאריך המבחן הקרוב ביותר
+                                            <div className="text-[11px] text-stone-400 font-medium text-right sm:text-left">
+                                                לחצי על שורת מבחן לפתיחת פרטים מהירה ▾
                                             </div>
                                         )}
                                     </div>
 
-                                    {/* 1. UPCOMING EXAMS VIEW */}
+                                    {/* 1. UPCOMING EXAMS VIEW - COMPACT ACCORDION LIST */}
                                     {examViewTab === 'upcoming' && (
                                         upcomingExams.length > 0 ? (
-                                            <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 relative z-10 animate-[fadeIn_0.2s_ease-out]">
+                                            <div className="mt-4 space-y-2.5 relative z-10 animate-[fadeIn_0.2s_ease-out]">
                                                 {upcomingExams.map(exam => {
                                                     const sub = activeUserData.subjects.find(s=>s.id === exam.subjectId);
                                                     const examCountdown = getExamCountdown(exam.date, exam.time);
+                                                    const examTasks = (activeUserData.tasks || []).filter(t => t.examId === exam.id && !t.givenUp);
+                                                    const completedSessions = examTasks.filter(t => t.completed || t.completedAt).length;
+                                                    const openSessions = examTasks.filter(t => !t.completed && !t.completedAt).length;
+                                                    const totalSessions = Math.max(exam.sessionsCount || 0, completedSessions + openSessions);
+                                                    const isExpanded = Boolean(expandedExamIds[exam.id]);
+
                                                     return (
-                                                        <div key={exam.id} className="p-5 rounded-3xl border border-indigo-100 bg-white shadow-sm hover:shadow-md transition-all flex flex-col justify-between">
-                                                            <div>
-                                                                <div className="flex justify-between items-start mb-2 gap-2 flex-wrap">
-                                                                    <div className="flex items-center gap-2 flex-wrap">
-                                                                        <div className="text-xs font-bold text-stone-500 flex items-center gap-1.5" dir="ltr">
-                                                                            <span>{new Date(exam.date).toLocaleDateString('he-IL')}</span>
-                                                                            {exam.time && <span className="text-stone-700 font-extrabold">• ⏰ {exam.time}</span>}
-                                                                        </div>
-                                                                        {examCountdown && (
-                                                                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${examCountdown.badgeClass}`}>
-                                                                                {examCountdown.text}
-                                                                            </span>
-                                                                        )}
+                                                        <div key={exam.id} className={`rounded-2xl border transition-all overflow-hidden ${isExpanded ? 'border-indigo-200 bg-indigo-50/20 shadow-sm' : 'border-stone-200/80 bg-white hover:border-indigo-200 shadow-2xs'}`}>
+                                                            {/* Compact Single Row Header */}
+                                                            <div 
+                                                                onClick={() => toggleExamExpand(exam.id)}
+                                                                className="p-3 sm:p-3.5 flex items-center justify-between gap-2.5 cursor-pointer select-none active:bg-stone-50/80 transition-colors"
+                                                            >
+                                                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                                                    <div 
+                                                                        className="w-9 h-9 rounded-xl flex items-center justify-center text-base shrink-0 shadow-2xs text-white font-bold"
+                                                                        style={{ backgroundColor: sub?.color || '#6366f1' }}
+                                                                    >
+                                                                        {sub?.emoji || '📚'}
                                                                     </div>
-                                                                    {exam.cancellations > 0 && (
-                                                                        <div className="text-[10px] font-bold text-rose-600 bg-rose-100 px-1.5 rounded">
-                                                                            ביטולים: {exam.cancellations}/3
+                                                                    <div className="min-w-0 flex-1">
+                                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                                            <span className={`font-bold text-sm sm:text-base text-stone-800 ${isExpanded ? 'whitespace-normal break-words leading-snug' : 'truncate'}`}>
+                                                                                {exam.examName || 'מבחן'} ב{sub?.name || 'כללי'}
+                                                                            </span>
+                                                                            {examCountdown && (
+                                                                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${examCountdown.badgeClass}`}>
+                                                                                    {examCountdown.text}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2 text-[11px] text-stone-500 font-medium mt-0.5 flex-wrap">
+                                                                            <span dir="ltr" className="font-semibold text-stone-600">
+                                                                                📅 {new Date(exam.date).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}{exam.time ? ` • ${exam.time}` : ''}
+                                                                            </span>
+                                                                            {totalSessions > 0 && (
+                                                                                <span className={`px-1.5 py-0.2 rounded font-bold text-[10px] ${completedSessions === totalSessions ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-indigo-50 text-indigo-700 border border-indigo-100'}`}>
+                                                                                    🎯 {completedSessions}/{totalSessions} סשנים
+                                                                                </span>
+                                                                            )}
+                                                                            {exam.notes && (
+                                                                                <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 rounded border border-amber-200/60 font-semibold">
+                                                                                    📖 מיקוד
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+
+                                                                {/* Quick Right Actions on Compact Row */}
+                                                                <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                                                                    {exam.grade ? (
+                                                                        <button 
+                                                                            onClick={() => { setActiveExamForGrade(exam); toggleModal('examGrade', true); }}
+                                                                            className="bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-black px-2.5 py-1.5 rounded-xl flex items-center gap-1 shadow-2xs active:scale-95"
+                                                                        >
+                                                                            <span>🏆</span> {exam.grade}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <button 
+                                                                            onClick={() => { setActiveExamForGrade(exam); toggleModal('examGrade', true); }}
+                                                                            className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[11px] font-bold px-2.5 py-1.5 rounded-xl transition-all active:scale-95"
+                                                                            title="הזנת ציון"
+                                                                        >
+                                                                            ✍️ ציון
+                                                                        </button>
+                                                                    )}
+                                                                    <button 
+                                                                        onClick={() => setExamActionsMenu(exam)} 
+                                                                        className="p-2 bg-stone-50 hover:bg-stone-100 text-stone-600 border border-stone-200 rounded-xl transition-all font-bold text-xs flex items-center justify-center active:scale-95" 
+                                                                        title="אפשרויות נוספות">
+                                                                        <span className="text-sm font-black leading-none">⋯</span>
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => toggleExamExpand(exam.id)}
+                                                                        className={`w-7 h-7 rounded-xl flex items-center justify-center text-xs transition-transform ${isExpanded ? 'bg-indigo-100 text-indigo-700 rotate-180' : 'bg-stone-100 text-stone-500'}`}
+                                                                        title={isExpanded ? 'צמצם פרטים' : 'הרחב פרטים'}
+                                                                    >
+                                                                        ▾
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Collapsible Expanded Details Drawer */}
+                                                            {isExpanded && (
+                                                                <div className="px-3.5 pb-3.5 pt-2.5 border-t border-indigo-100/80 bg-white/95 space-y-2.5 text-xs animate-[fadeIn_0.15s_ease-out]">
+                                                                    <div className="font-extrabold text-sm sm:text-base text-indigo-950 leading-snug break-words">
+                                                                        📌 {exam.examName || 'מבחן'} ב{sub?.name || 'כללי'}
+                                                                    </div>
+                                                                    {exam.notes && (
+                                                                        <div className="p-2.5 bg-indigo-50/50 border border-indigo-100 rounded-xl text-stone-700 whitespace-pre-wrap leading-relaxed">
+                                                                            <span className="font-bold text-indigo-900 block mb-0.5">📖 חומר ומיקוד למבחן:</span>
+                                                                            {exam.notes}
                                                                         </div>
                                                                     )}
-                                                                </div>
-                                                                <div className="font-bold text-lg leading-tight text-stone-800">
-                                                                    {exam.examName || 'מבחן'} ב{sub?.name || 'כללי'}
-                                                                </div>
-                                                                {(() => {
-                                                                    const examTasks = (activeUserData.tasks || []).filter(t => t.examId === exam.id && !t.givenUp);
-                                                                    const completedSessions = examTasks.filter(t => t.completed || t.completedAt).length;
-                                                                    const openSessions = examTasks.filter(t => !t.completed && !t.completedAt).length;
-                                                                    const totalSessions = Math.max(exam.sessionsCount || 0, completedSessions + openSessions);
-
-                                                                    if (exam.targetHours > 0) {
-                                                                        if (completedSessions > 0) {
-                                                                            return (
-                                                                                <div className="text-xs font-bold mt-2 bg-emerald-50 text-emerald-800 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-emerald-200 shadow-2xs">
-                                                                                    <span>🎯</span>
-                                                                                    <span>הושלמו {completedSessions}/{totalSessions} מפגשים ({exam.targetHours} שעות)</span>
-                                                                                </div>
-                                                                            );
-                                                                        }
-                                                                        return (
-                                                                            <div className="text-xs text-stone-500 mt-2 bg-stone-50 inline-block px-2 py-1 rounded-lg border border-stone-200">
-                                                                                תוכננו {totalSessions} מפגשים ({exam.targetHours} שעות)
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    if (completedSessions > 0) {
-                                                                        return (
-                                                                            <div className="text-xs font-bold mt-2 bg-emerald-50 text-emerald-800 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-emerald-200 shadow-2xs">
-                                                                                <span>{openSessions === 0 ? '✅' : '🎯'}</span>
-                                                                                <span>
-                                                                                    {openSessions > 0 
-                                                                                        ? (completedSessions === 1 ? `הושלם סשן 1 (${openSessions} בתהליך)` : `הושלמו ${completedSessions} סשנים (${openSessions} בתהליך)`)
-                                                                                        : (completedSessions === 1 ? 'הושלם סשן 1 למבחן' : `הושלמו ${completedSessions} סשנים למבחן`)}
-                                                                                </span>
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    if (openSessions > 0) {
-                                                                        return (
-                                                                            <div className="text-xs font-bold mt-2 bg-amber-50 text-amber-900 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-200 shadow-2xs">
-                                                                                <span>⚡</span>
-                                                                                <span>{openSessions === 1 ? 'תוכנן סשן למידה 1' : `תוכננו ${openSessions} סשני למידה`}</span>
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    return (
-                                                                        <div className="text-xs text-stone-400 mt-2 bg-stone-50 inline-block px-2 py-1 rounded-lg border border-stone-200">
-                                                                            ללא תוכנית שעות
-                                                                        </div>
-                                                                    );
-                                                                })()}
-                                                            </div>
-
-                                                            <div className="flex gap-2 w-full mt-4 pt-3 border-t border-stone-100 items-center">
-                                                                {!exam.grade ? (
-                                                                    <button 
-                                                                        onClick={() => { setActiveExamForGrade(exam); toggleModal('examGrade', true); }} 
-                                                                        className="flex-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-sm font-bold py-2.5 rounded-2xl transition-all flex items-center justify-center gap-1.5 active:scale-95 shadow-xs">
-                                                                        <span>✍️</span> הזנת ציון
-                                                                    </button>
-                                                                ) : (
-                                                                    <div className="flex-1 bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold py-2.5 px-3 rounded-2xl flex items-center justify-center gap-1.5 shadow-xs">
-                                                                        <span>🏆</span> ציון: <span className="text-sm font-black">{exam.grade}</span>
+                                                                    <div className="flex flex-wrap gap-2">
+                                                                        <button 
+                                                                            type="button"
+                                                                            onClick={() => handleOpenSingleSessionModal(exam)}
+                                                                            className="flex-1 min-w-[130px] py-2 px-3 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-xl font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                                                                        >
+                                                                            <span>⚡</span> + סשן למידה (+3 נק')
+                                                                        </button>
+                                                                        <button 
+                                                                            type="button"
+                                                                            onClick={() => handleOpenNotesExam(exam)}
+                                                                            className="flex-1 min-w-[130px] py-2 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-xl font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                                                                        >
+                                                                            <span>📖</span> {exam.notes ? 'עריכת מיקוד וסשנים' : 'הגדרת חומר למבחן'}
+                                                                        </button>
+                                                                        <button 
+                                                                            type="button"
+                                                                            onClick={() => handleGenerateExam(exam.subjectId)}
+                                                                            className="py-2 px-3 bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 rounded-xl font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                                                                        >
+                                                                            <span>📄</span> חוברת PDF
+                                                                        </button>
                                                                     </div>
-                                                                )}
-                                                                <button 
-                                                                    onClick={() => setExamActionsMenu(exam)} 
-                                                                    className="px-3.5 py-2.5 bg-stone-50 hover:bg-stone-100 text-stone-600 border border-stone-200 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-1.5 active:scale-95 shadow-xs" 
-                                                                    title="אפשרויות נוספות">
-                                                                    <span className="text-base font-black leading-none">⋯</span>
-                                                                    <span className="text-xs">אפשרויות</span>
-                                                                </button>
-                                                            </div>
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     );
                                                 })}
                                             </div>
                                         ) : (
-                                            <div className="mt-6 p-8 rounded-3xl bg-stone-50/80 border border-dashed border-stone-200 text-center relative z-10 animate-[fadeIn_0.2s_ease-out]">
-                                                <div className="text-4xl mb-2">🥳</div>
-                                                <h3 className="text-lg font-bold text-stone-800">אין מבחנים קרובים ברשימה</h3>
+                                            <div className="mt-5 p-6 rounded-3xl bg-stone-50/80 border border-dashed border-stone-200 text-center relative z-10 animate-[fadeIn_0.2s_ease-out]">
+                                                <div className="text-3xl mb-1.5">🥳</div>
+                                                <h3 className="text-base font-bold text-stone-800">אין מבחנים קרובים ברשימה</h3>
                                                 <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-                                                    כל הכבוד! לוח המבחנים הקרוב שלך פנוי. לחצי על "הוספה מהירה" או "תכנון למידה חכם" כדי להוסיף מבחן חדש.
+                                                    לוח המבחנים הקרוב שלך פנוי. לחצי על "הוספה מהירה" או "תכנון חכם" כדי להוסיף מבחן חדש.
                                                 </p>
-                                                <div className="flex flex-wrap justify-center gap-3 mt-4">
-                                                    <button onClick={() => toggleModal('quickExam', true)} className="bg-indigo-600 text-white text-xs font-bold px-4 py-2.5 rounded-xl hover:bg-indigo-700 transition-all active:scale-95 shadow-xs">
+                                                <div className="flex flex-wrap justify-center gap-2.5 mt-3.5">
+                                                    <button onClick={() => toggleModal('quickExam', true)} className="bg-indigo-600 text-white text-xs font-bold px-4 py-2 rounded-xl hover:bg-indigo-700 transition-all active:scale-95 shadow-xs">
                                                         + הוספת מבחן חדש
                                                     </button>
                                                     {pastExams.length > 0 && (
-                                                        <button onClick={() => setExamViewTab('past')} className="bg-white text-stone-700 border border-stone-200 text-xs font-bold px-4 py-2.5 rounded-xl hover:bg-stone-100 transition-all active:scale-95">
-                                                            לצפייה במבחנים שהתקיימו ({pastExams.length}) 📜
+                                                        <button onClick={() => setExamViewTab('past')} className="bg-white text-stone-700 border border-stone-200 text-xs font-bold px-4 py-2 rounded-xl hover:bg-stone-100 transition-all active:scale-95">
+                                                            לצפייה בארכיון ({pastExams.length}) 📜
                                                         </button>
                                                     )}
                                                 </div>
@@ -7515,35 +6983,35 @@ function App() {
                                         )
                                     )}
 
-                                    {/* 2. PAST EXAMS ARCHIVE VIEW */}
+                                    {/* 2. PAST EXAMS ARCHIVE VIEW - COMPACT LIST */}
                                     {examViewTab === 'past' && (
-                                        <div className="mt-5 space-y-4 relative z-10 animate-[fadeIn_0.2s_ease-out]">
-                                            {/* Summary Stats Banner */}
-                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                                <div className="bg-purple-50/70 border border-purple-100 p-3.5 rounded-2xl">
-                                                    <div className="text-[11px] font-bold text-purple-700">🎓 סה"כ מבחנים</div>
-                                                    <div className="text-2xl font-black text-purple-900 mt-0.5">{pastExams.length}</div>
+                                        <div className="mt-4 space-y-3.5 relative z-10 animate-[fadeIn_0.2s_ease-out]">
+                                            {/* Compact Summary Stats Banner */}
+                                            <div className="grid grid-cols-4 gap-2">
+                                                <div className="bg-purple-50/70 border border-purple-100 p-2.5 rounded-2xl text-center">
+                                                    <div className="text-[10px] font-bold text-purple-700">🎓 מבחנים</div>
+                                                    <div className="text-lg sm:text-xl font-black text-purple-900">{pastExams.length}</div>
                                                 </div>
-                                                <div className="bg-emerald-50/70 border border-emerald-100 p-3.5 rounded-2xl">
-                                                    <div className="text-[11px] font-bold text-emerald-700">🏆 ממוצע ציונים</div>
-                                                    <div className="text-2xl font-black text-emerald-900 mt-0.5">{avgPastGrade ? avgPastGrade : '—'}</div>
+                                                <div className="bg-emerald-50/70 border border-emerald-100 p-2.5 rounded-2xl text-center">
+                                                    <div className="text-[10px] font-bold text-emerald-700">🏆 ממוצע</div>
+                                                    <div className="text-lg sm:text-xl font-black text-emerald-900">{avgPastGrade ? avgPastGrade : '—'}</div>
                                                 </div>
-                                                <div className="bg-amber-50/70 border border-amber-100 p-3.5 rounded-2xl">
-                                                    <div className="text-[11px] font-bold text-amber-700">🌟 ציון שיא</div>
-                                                    <div className="text-2xl font-black text-amber-900 mt-0.5">{highestPastGrade !== null ? highestPastGrade : '—'}</div>
+                                                <div className="bg-amber-50/70 border border-amber-100 p-2.5 rounded-2xl text-center">
+                                                    <div className="text-[10px] font-bold text-amber-700">🌟 שיא</div>
+                                                    <div className="text-lg sm:text-xl font-black text-amber-900">{highestPastGrade !== null ? highestPastGrade : '—'}</div>
                                                 </div>
-                                                <div className="bg-stone-50 border border-stone-200 p-3.5 rounded-2xl">
-                                                    <div className="text-[11px] font-bold text-stone-600">⏳ ממתינים לציון</div>
-                                                    <div className="text-2xl font-black text-stone-800 mt-0.5">{pendingGradeCount}</div>
+                                                <div className="bg-stone-50 border border-stone-200 p-2.5 rounded-2xl text-center">
+                                                    <div className="text-[10px] font-bold text-stone-600">⏳ ללא ציון</div>
+                                                    <div className="text-lg sm:text-xl font-black text-stone-800">{pendingGradeCount}</div>
                                                 </div>
                                             </div>
 
                                             {/* Subject Filters */}
                                             {pastSubjects.length > 1 && (
-                                                <div className="flex flex-wrap gap-2 pt-1 pb-1">
+                                                <div className="flex flex-wrap gap-1.5 pt-0.5">
                                                     <button 
                                                         onClick={() => setPastExamSubjectFilter('all')}
-                                                        className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border active:scale-95 ${
+                                                        className={`px-3 py-1 rounded-full text-xs font-bold transition-all border active:scale-95 ${
                                                             pastExamSubjectFilter === 'all' 
                                                                 ? 'bg-purple-700 text-white border-purple-700 shadow-xs' 
                                                                 : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
@@ -7557,7 +7025,7 @@ function App() {
                                                             <button 
                                                                 key={sub.id}
                                                                 onClick={() => setPastExamSubjectFilter(sub.id)}
-                                                                className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border flex items-center gap-1.5 active:scale-95 ${
+                                                                className={`px-3 py-1 rounded-full text-xs font-bold transition-all border flex items-center gap-1 active:scale-95 ${
                                                                     pastExamSubjectFilter === sub.id 
                                                                         ? 'bg-purple-100 text-purple-900 border-purple-300 shadow-xs' 
                                                                         : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
@@ -7570,10 +7038,10 @@ function App() {
                                                 </div>
                                             )}
 
-                                            {/* Past Exams Grid */}
+                                            {/* Past Exams Compact Rows */}
                                             {pastExams.length > 0 ? (
                                                 filteredPastExams.length > 0 ? (
-                                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                    <div className="space-y-2">
                                                         {filteredPastExams.map(exam => {
                                                             const sub = activeUserData.subjects.find(s=>s.id === exam.subjectId);
                                                             const pastLabel = typeof formatPastExamDate === 'function' ? formatPastExamDate(exam.date) : 'התקיים';
@@ -7586,53 +7054,54 @@ function App() {
                                                                 ? 'bg-amber-100 text-amber-800 border-amber-200' 
                                                                 : 'bg-stone-100 text-stone-800 border-stone-200';
 
+                                                            const isPastExpanded = Boolean(expandedExamIds[exam.id]);
                                                             return (
-                                                                <div key={exam.id} className="p-5 rounded-3xl border border-stone-200 bg-stone-50/70 hover:bg-white hover:border-purple-200 shadow-xs hover:shadow-md transition-all flex flex-col justify-between">
-                                                                    <div>
-                                                                        <div className="flex justify-between items-start mb-2 gap-2 flex-wrap">
-                                                                            <div className="flex items-center gap-1.5 flex-wrap">
-                                                                                <span className="text-[11px] font-bold text-stone-500 bg-white px-2 py-0.5 rounded-lg border border-stone-200" dir="ltr">
-                                                                                    {new Date(exam.date).toLocaleDateString('he-IL')}{exam.time ? ` • ⏰ ${exam.time}` : ''}
-                                                                                </span>
-                                                                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-100">
-                                                                                    {pastLabel}
-                                                                                </span>
+                                                                <div 
+                                                                    key={exam.id} 
+                                                                    onClick={() => toggleExamExpand(exam.id)}
+                                                                    className="p-3 rounded-2xl border border-stone-200/80 bg-stone-50/70 hover:bg-white hover:border-purple-200 shadow-2xs transition-all flex items-center justify-between gap-2.5 cursor-pointer select-none"
+                                                                >
+                                                                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                                                        <div 
+                                                                            className="w-8 h-8 rounded-xl flex items-center justify-center text-sm shrink-0 text-white font-bold"
+                                                                            style={{ backgroundColor: sub?.color || '#a8a29e' }}
+                                                                        >
+                                                                            {sub?.emoji || '📚'}
+                                                                        </div>
+                                                                        <div className="min-w-0 flex-1">
+                                                                            <div className={`font-bold text-sm text-stone-800 ${isPastExpanded ? 'whitespace-normal break-words leading-snug' : 'truncate'}`}>
+                                                                                {exam.examName || 'מבחן'} ב{sub?.name || 'כללי'}
                                                                             </div>
-                                                                        </div>
-
-                                                                        <div className="font-bold text-lg leading-tight text-stone-800 mt-1">
-                                                                            {exam.examName || 'מבחן'} ב{sub?.name || 'כללי'}
-                                                                        </div>
-                                                                        
-                                                                        <div className="mt-3 p-3 rounded-2xl bg-white border border-stone-100 shadow-xs flex items-center justify-between">
-                                                                            <span className="text-xs font-bold text-stone-500">ציון שהושג:</span>
-                                                                            {exam.grade ? (
-                                                                                <span className={`text-base font-black px-3 py-0.5 rounded-xl border shadow-xs ${gradeBadgeColor}`}>
-                                                                                    {exam.grade}
-                                                                                </span>
-                                                                            ) : (
-                                                                                <button 
-                                                                                    onClick={() => { setActiveExamForGrade(exam); toggleModal('examGrade', true); }}
-                                                                                    className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-1 rounded-xl transition-all active:scale-95"
-                                                                                >
-                                                                                    + הזיני ציון
-                                                                                </button>
-                                                                            )}
+                                                                            <div className="flex items-center gap-1.5 text-[11px] text-stone-500 mt-0.5 flex-wrap">
+                                                                                <span dir="ltr">{new Date(exam.date).toLocaleDateString('he-IL')}</span>
+                                                                                <span>•</span>
+                                                                                <span className="text-purple-700 font-semibold">{pastLabel}</span>
+                                                                            </div>
                                                                         </div>
                                                                     </div>
 
-                                                                    <div className="flex gap-2 w-full mt-4 pt-3 border-t border-stone-200/60 items-center">
-                                                                        <button 
-                                                                            onClick={() => { setActiveExamForGrade(exam); toggleModal('examGrade', true); }} 
-                                                                            className="flex-1 bg-white hover:bg-stone-50 text-stone-700 border border-stone-200 text-xs sm:text-sm font-bold py-2.5 rounded-2xl transition-all flex items-center justify-center gap-1.5 active:scale-95 shadow-xs">
-                                                                            <span>✏️</span> {exam.grade ? 'עריכת ציון' : 'הזנת ציון'}
-                                                                        </button>
+                                                                    <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                                                                        {exam.grade ? (
+                                                                            <button 
+                                                                                onClick={() => { setActiveExamForGrade(exam); toggleModal('examGrade', true); }}
+                                                                                className={`text-xs font-black px-2.5 py-1 rounded-xl border shadow-2xs active:scale-95 ${gradeBadgeColor}`}
+                                                                                title="לחצי לעריכת ציון"
+                                                                            >
+                                                                                🏆 {exam.grade}
+                                                                            </button>
+                                                                        ) : (
+                                                                            <button 
+                                                                                onClick={() => { setActiveExamForGrade(exam); toggleModal('examGrade', true); }}
+                                                                                className="text-[11px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1 rounded-xl transition-all active:scale-95"
+                                                                            >
+                                                                                + ציון
+                                                                            </button>
+                                                                        )}
                                                                         <button 
                                                                             onClick={() => setExamActionsMenu(exam)} 
-                                                                            className="px-4 py-2.5 bg-white hover:bg-stone-50 text-stone-600 border border-stone-200 rounded-2xl transition-all font-bold text-sm flex items-center justify-center gap-1.5 active:scale-95 shadow-xs" 
+                                                                            className="p-2 bg-white hover:bg-stone-50 text-stone-600 border border-stone-200 rounded-xl transition-all font-bold text-xs flex items-center justify-center active:scale-95" 
                                                                             title="אפשרויות נוספות">
-                                                                            <span className="text-base font-black leading-none">⋯</span>
-                                                                            <span className="text-xs">אפשרויות</span>
+                                                                            <span className="text-sm font-black leading-none">⋯</span>
                                                                         </button>
                                                                     </div>
                                                                 </div>
@@ -7805,7 +7274,7 @@ function App() {
 
                             const getTaskDate = (t) => {
                                 if (t.completedAt) return new Date(t.completedAt);
-                                if (t.dueDate) return new Date(t.dueDate);
+                                if (t.dueDate) return new Date(t.dueDate.length === 10 ? `${t.dueDate}T12:00:00` : t.dueDate);
                                 if (t.createdAt) return new Date(t.createdAt);
                                 return null;
                             };
@@ -8343,7 +7812,7 @@ function App() {
                                                 <span className="text-3xl drop-shadow-sm">🏆</span> טבלת אלופות שבועית
                                             </h3>
                                             <div className="text-xs text-amber-800 font-bold bg-amber-50/90 border border-amber-200 rounded-xl px-3 py-1.5 inline-flex items-center gap-1.5 mt-2">
-                                                <span>⏳</span> התחרות ננעלת במוצאי שבת ב-22:00 ומוכתרת אלופת השבוע 👑
+                                                <span>⏳</span> במוצ״ש ב-22:00 מוכתרת אלופת השבוע 👑 וב-00:00 מתאפסות הנקודות לשבוע חדש
                                             </div>
                                         </div>
                                         <div className="space-y-4 relative z-10">
@@ -8508,12 +7977,12 @@ function App() {
                                     </div>
                                     
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8 relative z-10">
-                                        <button className="bg-stone-50 border border-stone-200 p-5 rounded-3xl transition-all group flex flex-col justify-center items-center hover:bg-emerald-50 hover:border-emerald-200 active:scale-95" onClick={()=>toggleModal('pointsHistory', true)}>
+                                        <button className="bg-stone-50 border border-stone-200 p-5 rounded-3xl transition-all group flex flex-col justify-center items-center hover:bg-emerald-50 hover:border-emerald-200 active:scale-95" onClick={()=>{ setPointsHistoryFilter('all'); toggleModal('pointsHistory', true); }}>
                                             <div className="text-4xl font-black text-emerald-500 mb-2 group-hover:scale-105 transition-transform" dir="ltr">{activeUserData.totalPoints}</div>
                                             <div className="text-xs font-bold text-stone-500 uppercase tracking-wide">סה"כ נקודות</div>
                                         </button>
                                         
-                                        <button className="bg-stone-50 border border-stone-200 p-5 rounded-3xl transition-all group flex flex-col justify-center items-center hover:bg-purple-50 hover:border-purple-200 active:scale-95" onClick={()=>toggleModal('pointsHistory', true)}>
+                                        <button className="bg-stone-50 border border-stone-200 p-5 rounded-3xl transition-all group flex flex-col justify-center items-center hover:bg-purple-50 hover:border-purple-200 active:scale-95" onClick={()=>{ setPointsHistoryFilter('weekly'); toggleModal('pointsHistory', true); }}>
                                             <div className="text-4xl font-black text-purple-500 mb-2 group-hover:scale-105 transition-transform" dir="ltr">{activeUserData.weeklyPoints}</div>
                                             <div className="text-xs font-bold text-stone-500 uppercase tracking-wide">השבוע</div>
                                             <div className="text-[10px] text-stone-400 mt-1 font-bold tracking-wider">שיא: {activeUserData.highestWeeklyPoints || 0}</div>
@@ -8680,14 +8149,23 @@ function App() {
                                     <div>
                                         <div className="flex justify-between items-center mb-1">
                                             <label className="text-xs font-bold text-stone-500 uppercase tracking-wide">נושא השיעור (למחולל המבחנים)</label>
-                                            {pastTopics.length > 0 && <span className="text-[10px] text-purple-600 font-bold">נושאים קודמים זמינים לבחירה</span>}
+                                            {pastTopics.length > 0 && (
+                                                <button 
+                                                    type="button" 
+                                                    onClick={() => setShowPastTopics(p => !p)}
+                                                    className="text-xs text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-2 py-0.5 rounded-lg font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shadow-2xs"
+                                                >
+                                                    <span>📚 נושאים קודמים ({pastTopics.length})</span>
+                                                    <span className="text-[10px]">{showPastTopics ? '▲' : '▼'}</span>
+                                                </button>
+                                            )}
                                         </div>
                                         <input 
                                             id="taskTopicInput"
                                             name="topic" 
                                             list="past-topics-list"
                                             required={false} 
-                                            placeholder="למשל: אינטגרלים, אוטופיה... (או בחרי נושא קיים)" 
+                                            placeholder="למשל: אינטגרלים, אוטופיה... (או לחצי על 'נושאים קודמים')" 
                                             className="w-full p-3 bg-white border border-stone-200 rounded-2xl text-sm outline-none font-medium focus:border-purple-400 transition-all shadow-sm" 
                                         />
                                         <datalist id="past-topics-list">
@@ -8695,21 +8173,27 @@ function App() {
                                                 <option key={idx} value={tp} />
                                             ))}
                                         </datalist>
-                                        {pastTopics.length > 0 && (
-                                            <div className="mt-2 flex flex-wrap gap-1.5 items-center">
-                                                <span className="text-[11px] font-bold text-stone-400">נושאים שהיו:</span>
-                                                {pastTopics.slice(0, 6).map((tp, idx) => (
-                                                    <button 
-                                                        key={idx} 
-                                                        type="button" 
-                                                        onClick={() => {
-                                                            const input = document.getElementById('taskTopicInput');
-                                                            if (input) input.value = tp;
-                                                        }}
-                                                        className="text-xs bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 px-2.5 py-1 rounded-xl transition-all font-medium active:scale-95">
-                                                        + {tp}
-                                                    </button>
-                                                ))}
+                                        {pastTopics.length > 0 && showPastTopics && (
+                                            <div className="mt-2 p-2.5 bg-stone-50 border border-stone-200 rounded-2xl animate-[fadeIn_0.2s_ease-out]">
+                                                <div className="text-[11px] font-bold text-stone-500 mb-1.5 flex items-center justify-between">
+                                                    <span>בחרי נושא מהעבר (מוסיף עוד משימה לאותו נושא ביומן):</span>
+                                                    <button type="button" onClick={() => setShowPastTopics(false)} className="text-stone-400 hover:text-stone-600 text-xs">✕</button>
+                                                </div>
+                                                <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto custom-scrollbar">
+                                                    {pastTopics.map((tp, idx) => (
+                                                        <button 
+                                                            key={idx} 
+                                                            type="button" 
+                                                            onClick={() => {
+                                                                const input = document.getElementById('taskTopicInput');
+                                                                if (input) input.value = tp;
+                                                                setShowPastTopics(false);
+                                                            }}
+                                                            className="text-xs bg-white text-purple-800 hover:bg-purple-50 border border-purple-200 px-2.5 py-1 rounded-xl transition-all font-medium active:scale-95 shadow-2xs">
+                                                            + {tp}
+                                                        </button>
+                                                    ))}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -9314,7 +8798,7 @@ function App() {
                                                                 : 'text-indigo-600 hover:text-indigo-800'
                                                         }`}
                                                     >
-                                                        לפי שעות
+                                                        לפי דקות
                                                     </button>
                                                     <button
                                                         type="button"
@@ -9335,9 +8819,9 @@ function App() {
                                                     <div className="flex items-center gap-2">
                                                         <input
                                                             type="text"
-                                                            inputMode="decimal"
+                                                            inputMode="numeric"
                                                             autoComplete="off"
-                                                            placeholder="למשל: 1.5, 2, 3.5..."
+                                                            placeholder="הקלידי דקות (למשל: 25, 45, 90)..."
                                                             value={studyDurationHoursInput}
                                                             onChange={(e) => {
                                                                 let val = e.target.value.replace(/[^0-9.,]/g, '').replace(',', '.');
@@ -9349,7 +8833,7 @@ function App() {
                                                             }}
                                                             className="flex-1 p-3 bg-white border border-indigo-200 rounded-xl text-sm font-bold text-stone-800 outline-none focus:ring-2 focus:ring-indigo-300"
                                                         />
-                                                        <span className="text-sm font-bold text-indigo-900 whitespace-nowrap">שעות</span>
+                                                        <span className="text-sm font-bold text-indigo-900 whitespace-nowrap">דקות</span>
                                                         {studyDurationHoursInput && (
                                                             <button
                                                                 type="button"
@@ -9367,7 +8851,7 @@ function App() {
                                                         if (!dur) return null;
                                                         return (
                                                             <div className="bg-white/90 p-2.5 rounded-xl border border-indigo-200 text-xs font-bold text-indigo-900 flex items-center justify-between shadow-2xs">
-                                                                <span>✨ משך למידה שחושב:</span>
+                                                                <span>✨ הומר לשעות:</span>
                                                                 <span className="text-indigo-700 font-extrabold">{dur.studyTimeRange} ({dur.studyDurationHours} שעות)</span>
                                                             </div>
                                                         );
@@ -9375,14 +8859,14 @@ function App() {
 
                                                     <div className="flex flex-wrap gap-1.5 pt-1">
                                                         {[
-                                                            { label: '30 דק\'', val: '0.5' },
-                                                            { label: 'שעה', val: '1' },
-                                                            { label: '1.5 שע\'', val: '1.5' },
-                                                            { label: 'שעתיים', val: '2' },
-                                                            { label: '2.5 שע\'', val: '2.5' },
-                                                            { label: '3 שעות', val: '3' },
-                                                            { label: '3.5 שע\'', val: '3.5' },
-                                                            { label: '4 שעות', val: '4' }
+                                                            { label: '30 דק\'', val: '30' },
+                                                            { label: 'שעה', val: '60' },
+                                                            { label: '1.5 שע\'', val: '90' },
+                                                            { label: 'שעתיים', val: '120' },
+                                                            { label: '2.5 שע\'', val: '150' },
+                                                            { label: '3 שעות', val: '180' },
+                                                            { label: '3.5 שע\'', val: '210' },
+                                                            { label: '4 שעות', val: '240' }
                                                         ].map(chip => {
                                                             const numVal = parseFloat(studyDurationHoursInput);
                                                             const isChipActive = studyDurationHoursInput === chip.val || 
@@ -10093,16 +9577,43 @@ function App() {
                     )}
 
 
-                    {modals.pointsHistory && (
+                    {modals.pointsHistory && (() => {
+                        const isWeeklyMode = pointsHistoryFilter === 'weekly';
+                        const now = new Date();
+                        const startOfWeekSunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay(), 0, 0, 0, 0);
+                        // Include points earned after Saturday 22:00 right before this Sunday (since weekly crowning is at 22:00 and new week points accrue from 22:00)
+                        const weekCutoffMs = startOfWeekSunday.getTime() - (2 * 3600000);
+                        const displayedPointsHistory = isWeeklyMode
+                            ? safePointsHistory.filter(log => {
+                                if (!log || log.canceled) return false;
+                                const d = new Date(log.date);
+                                return !isNaN(d.getTime()) && d.getTime() >= weekCutoffMs;
+                            })
+                            : safePointsHistory;
+
+                        return (
                         <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-[70] flex flex-col justify-end md:justify-center items-center p-0 md:p-4 animate-[fadeIn_0.2s_ease-out]">
                             <div className="bg-white rounded-t-[32px] md:rounded-[32px] w-full max-w-md p-6 md:p-8 h-[85vh] md:max-h-[70vh] flex flex-col shadow-2xl animate-[slideUp_0.3s_ease-out] pb-safe-bottom md:pb-8">
                                 <div className="flex justify-between items-center mb-6 pb-4 border-b border-stone-100">
-                                    <h3 className="font-bold text-xl text-stone-800">היסטוריית נקודות 🏆</h3>
+                                    <div>
+                                        <h3 className="font-bold text-xl text-stone-800">
+                                            {isWeeklyMode ? 'היסטוריית נקודות השבוע ⚡' : 'היסטוריית כל הנקודות 🏆'}
+                                        </h3>
+                                        {isWeeklyMode && (
+                                            <div className="text-xs font-semibold text-purple-600 mt-0.5">
+                                                נקודות שנצברו השבוע (מיום ראשון {startOfWeekSunday.toLocaleDateString('he-IL')})
+                                            </div>
+                                        )}
+                                    </div>
                                     <button onClick={()=>toggleModal('pointsHistory',false)} className="bg-stone-100 p-2 rounded-full text-stone-500 hover:bg-stone-200 transition-colors active:scale-95"><IconX className="w-4 h-4"/></button>
                                 </div>
                                 <div className="overflow-y-auto flex-1 space-y-3 pr-2 custom-scrollbar">
-                                    {safePointsHistory.length === 0 ? <div className="text-center py-10 text-sm text-stone-400 font-medium">אין היסטוריה עדיין. בצעי משימות כדי לצבור נקודות!</div> : 
-                                    [...safePointsHistory].sort((a,b)=>new Date(b.date)-new Date(a.date)).map(log => (
+                                    {displayedPointsHistory.length === 0 ? (
+                                        <div className="text-center py-10 text-sm text-stone-400 font-medium">
+                                            {isWeeklyMode ? 'אין עדיין נקודות השבוע. בצעי משימות כדי לצבור נקודות השבוע! 💪' : 'אין היסטוריה עדיין. בצעי משימות כדי לצבור נקודות!'}
+                                        </div>
+                                    ) : 
+                                    [...displayedPointsHistory].sort((a,b)=>new Date(b.date)-new Date(a.date)).map(log => (
                                         <div key={log.id} className={`p-4 rounded-2xl border-r-[6px] shadow-[0_2px_10px_-2px_rgba(0,0,0,0.02)] ${log.points > 0 ? 'bg-emerald-50/50 border-emerald-400 border-l border-y border-stone-100' : log.points === 0 ? 'bg-stone-50 border-stone-400 border-l border-y' : 'bg-rose-50/50 border-rose-400 border-l border-y border-stone-100'}`}>
                                             <div className="flex justify-between items-start font-bold text-sm mb-1.5 text-stone-800">
                                                 <div className="flex flex-col">
@@ -10125,7 +9636,8 @@ function App() {
                                 </div>
                             </div>
                         </div>
-                    )}
+                        );
+                    })()}
 
 
                     {modals.streakHistory && (
@@ -10308,7 +9820,7 @@ function App() {
                                                                         </span>
                                                                     )}
                                                                 </div>
-                                                                {pt.lessonTopic && <div className="text-xs text-stone-400 mt-0.5 font-medium">נושא: {pt.lessonTopic}</div>}
+                                                                {pt.lessonTopic && pt.lessonTopic.trim() !== '' && pt.lessonTopic.trim() !== (pt.title || '').trim() && `תרגול: ${pt.lessonTopic.trim()}` !== (pt.title || '').trim() && <div className="text-xs text-stone-400 mt-0.5 font-medium">נושא: {pt.lessonTopic}</div>}
                                                             </div>
                                                             <button 
                                                                 onClick={() => handleCopyFriendTask(pt, fSubName)} 
@@ -10562,7 +10074,7 @@ function App() {
                                                 )}
                                             </div>
                                             <h3 className="font-bold text-lg text-stone-800 leading-snug">{task.title}</h3>
-                                            {task.lessonTopic && <div className="text-xs text-stone-400 mt-0.5 font-medium">נושא: {task.lessonTopic}</div>}
+                                            {task.lessonTopic && task.lessonTopic.trim() !== '' && task.lessonTopic.trim() !== (task.title || '').trim() && `תרגול: ${task.lessonTopic.trim()}` !== (task.title || '').trim() && <div className="text-xs text-stone-400 mt-0.5 font-medium">נושא: {task.lessonTopic}</div>}
                                         </div>
                                         <button onClick={() => setTaskActionsMenu(null)} className="text-stone-400 bg-stone-100 hover:bg-stone-200 p-2 rounded-full active:scale-95 transition-colors">
                                             <IconX className="w-4 h-4"/>
@@ -11848,15 +11360,20 @@ function App() {
                                         { id: 'lesson_log', title: 'יומן שיעורים', desc: 'תיעוד כל השיעורים והנושאים שנלמדו השנה', icon: '📖', color: 'from-blue-500/10 to-cyan-500/10 hover:border-blue-300' },
                                         { id: 'schedule', title: 'לו"ז וזמנים', desc: 'מערכת שעות, שעות שקטות ועוגנים קבועים', icon: '📅', color: 'from-amber-500/10 to-orange-500/10 hover:border-amber-300' },
                                         { id: 'profile', title: 'פרופיל ותגים', desc: 'צפייה ברצף, בהישגים ובמדליות שלך', icon: '👤', color: 'from-pink-500/10 to-rose-500/10 hover:border-pink-300' },
-                                        { id: 'settings', title: 'הגדרות מערכת', desc: 'ניהול מקצועות, חוקי ניקוד ואיפוס נתונים', icon: '⚙️', color: 'from-stone-500/10 to-stone-600/10 hover:border-stone-300' }
+                                        { id: 'settings', title: 'הגדרות מערכת', desc: 'ניהול מקצועות, חוקי ניקוד ואיפוס נתונים', icon: '⚙️', color: 'from-stone-500/10 to-stone-600/10 hover:border-stone-300' },
+                                        { id: 'feedback_box', title: 'דיווח תקלה / בקשה', desc: 'תיבת הערות, באגים ובקשות לשדרוג האפליקציה', icon: '💬', color: 'from-indigo-500/10 to-purple-500/10 hover:border-indigo-300', isFeedback: true }
                                     ].map(item => {
-                                        const isSelected = activeTab === item.id;
+                                        const isSelected = !item.isFeedback && activeTab === item.id;
                                         return (
                                             <button
                                                 key={item.id}
                                                 onClick={() => {
-                                                    setActiveTab(item.id);
                                                     setIsMoreMenuOpen(false);
+                                                    if (item.isFeedback) {
+                                                        setIsFeedbackModalOpen(true);
+                                                    } else {
+                                                        setActiveTab(item.id);
+                                                    }
                                                 }}
                                                 className={`p-4 rounded-2xl border text-right transition-all flex items-start gap-3.5 bg-gradient-to-br ${item.color} active:scale-98 ${
                                                     isSelected ? 'border-purple-500 ring-2 ring-purple-200 shadow-sm bg-purple-50/50' : 'border-stone-200/80 hover:bg-stone-50/80'
