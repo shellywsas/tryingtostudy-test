@@ -18,7 +18,9 @@
     }
 
     function isTaskSubmittedOnTime(task) {
-        if (!task || !task.completedAt || !task.dueDate) return false;
+        if (!task || !task.completedAt) return false;
+        // Practice sessions and flexible sessions have no fixed deadline and are always on-time
+        if (task.isPracticeSession || task.isFlexibleExamSession || !task.dueDate) return true;
         const subDate = new Date(task.completedAt);
         const timeStr = task.dueTime || '23:59:59';
         const dueDate = new Date(`${task.dueDate}T${timeStr}`);
@@ -392,7 +394,7 @@
                 const subDate = new Date(updated.completedAt);
                 const timeStr = updated.dueTime || '23:59:59';
                 const dueDate = updated.dueDate ? new Date(`${updated.dueDate}T${timeStr}`) : null;
-                const wasActuallyOnTime = onTime || (dueDate && !isNaN(dueDate.getTime()) && subDate.getTime() <= (dueDate.getTime() + (5 * 60 * 1000)));
+                const wasActuallyOnTime = onTime || updated.isPracticeSession || updated.isFlexibleExamSession || !updated.dueDate || (dueDate && !isNaN(dueDate.getTime()) && subDate.getTime() <= (dueDate.getTime() + (5 * 60 * 1000)));
 
                 if (wasActuallyOnTime) {
                     if (updated.autoPenaltyApplied) {
@@ -404,22 +406,65 @@
                         changed = true;
                     }
 
-                    if ((updated.pointsEarned === undefined || updated.pointsEarned <= 0) && !updated.givenUp) {
-                        const createdAt = updated.createdAt ? new Date(updated.createdAt) : null;
-                        let points = 1;
-                        if (dueDate && createdAt && !isNaN(dueDate.getTime()) && !isNaN(createdAt.getTime())) {
-                            const totalMs = dueDate.getTime() - createdAt.getTime();
-                            const usedMs = subDate.getTime() - createdAt.getTime();
-                            if (usedMs <= Math.max(totalMs / 2, 86400000)) points = 2;
+                    // Points calculation
+                    let expectedPoints = updated.pointsEarned;
+                    if (expectedPoints === undefined || expectedPoints <= 0) {
+                        if (updated.isPracticeSession) {
+                            expectedPoints = (updated.studyDurationMinutes >= 30 || updated.studyDurationHours >= 0.5) ? 2 : 1;
+                        } else if (updated.rewardPoints || updated.isFlexibleExamSession) {
+                            expectedPoints = updated.rewardPoints || 3;
+                        } else {
+                            const createdAt = updated.createdAt ? new Date(updated.createdAt) : null;
+                            expectedPoints = 1;
+                            if (dueDate && createdAt && !isNaN(dueDate.getTime()) && !isNaN(createdAt.getTime())) {
+                                const totalMs = dueDate.getTime() - createdAt.getTime();
+                                const usedMs = subDate.getTime() - createdAt.getTime();
+                                if (usedMs <= Math.max(totalMs / 2, 86400000)) expectedPoints = 2;
+                            }
+                            if (updated.isExamPrep) expectedPoints += 1;
                         }
-                        if (updated.isExamPrep) points += 1;
-                        const delta = points - (updated.pointsEarned || 0);
+                    }
+
+                    // Ensure pointsHistory has an entry for this completed task
+                    const hasPositiveHist = newHist.some(h => h && h.taskId === updated.id && (h.points || 0) > 0 && !isAutoHistoryId(h.id));
+                    if (!hasPositiveHist && !updated.givenUp) {
+                        const sub = (user.subjects || []).find(s => s.id === updated.subjectId);
+                        const pointsVal = Math.max(1, expectedPoints || (updated.isPracticeSession ? 2 : 1));
+                        updated.pointsEarned = pointsVal;
+                        const subName = sub ? sub.name : 'כללי';
+                        const subEmoji = sub ? sub.emoji : '📚';
+                        const detailsStr = updated.isPracticeSession
+                            ? `בוצע סשן תרגול מעמיק (+${pointsVal} נקודות)! 💡`
+                            : (pointsVal >= 2 ? 'הוגש מוקדם! אלופה.' : 'הוגש בזמן שנקבע.');
+
+                        const healedLog = {
+                            id: 'ph_healed_' + updated.id,
+                            taskId: updated.id,
+                            taskTitle: updated.title,
+                            subjectName: subName,
+                            subjectEmoji: subEmoji,
+                            points: pointsVal,
+                            date: updated.completedAt || new Date().toISOString(),
+                            details: detailsStr,
+                            studyDurationHours: updated.studyDurationHours || null,
+                            studyDurationMinutes: updated.studyDurationMinutes || null,
+                            studyTimeRange: updated.studyTimeRange || null
+                        };
+
+                        newHist.unshift(healedLog);
+                        totalPoints += pointsVal;
+                        if (subDate.getTime() >= weekStart) {
+                            weeklyPoints += pointsVal;
+                        }
+                        changed = true;
+                    } else if ((updated.pointsEarned === undefined || updated.pointsEarned <= 0) && !updated.givenUp) {
+                        const delta = expectedPoints - (updated.pointsEarned || 0);
                         if (delta > 0) {
                             totalPoints += delta;
                             if (subDate.getTime() >= weekStart) {
                                 weeklyPoints += delta;
                             }
-                            updated.pointsEarned = points;
+                            updated.pointsEarned = expectedPoints;
                             changed = true;
                         }
                     }
@@ -465,7 +510,12 @@
 
         // Preserve weeklyPoints - weekly crowning and points reset are handled safely in weekly reset cycle
 
-        if (!changed) return user;
+        // Streak healing: count on-time completed tasks since last broken streak
+        const onTimeCompletedCount = tasks.filter(t => t && t.completed && !t.givenUp && isTaskSubmittedOnTime(t)).length;
+        const safeStreak = Math.max(taskStreak || 0, user.taskStreak || 0, streakHistory.length === 0 ? onTimeCompletedCount : 0);
+        const safeLongest = Math.max(user.longestStreak || 0, safeStreak);
+
+        if (!changed && safeStreak === (user.taskStreak || 0) && safeLongest === (user.longestStreak || 0)) return user;
 
         return {
             ...user,
@@ -473,7 +523,8 @@
             totalPoints,
             weeklyPoints,
             pointsHistory: newHist,
-            taskStreak: taskStreak !== undefined ? taskStreak : (user.taskStreak || 0),
+            taskStreak: safeStreak,
+            longestStreak: safeLongest,
             streakHistory,
             deletedTaskIds: Array.from(deletedSet)
         };
