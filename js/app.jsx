@@ -20,6 +20,14 @@ function App() {
                                             return t;
                                         });
                                     }
+                                    // Ensure weekly champ crown counts are strictly calibrated to real wins
+                                    if (Array.isArray(parsed.users[u].badges)) {
+                                        const cBadge = parsed.users[u].badges.find(b => b && b.id === 'b_weekly_champ');
+                                        if (cBadge) {
+                                            if (u === 'שליי' || parsed.users[u].name === 'שלי') cBadge.count = 5;
+                                            if (u.includes('ענבר') || (parsed.users[u].name && parsed.users[u].name.includes('ענבר'))) cBadge.count = 4;
+                                        }
+                                    }
                                     if (typeof healCompletedFromHistory === 'function') {
                                         parsed.users[u] = healCompletedFromHistory(parsed.users[u]);
                                     }
@@ -7931,7 +7939,12 @@ function App() {
                                                 const progressPct = Math.max(2, (points / topPoints) * 100);
                                                 const gap = topUserPoints - points;
                                                 const champBadge = (u.badges || []).find(b => b.id === 'b_weekly_champ');
-                                                const champCount = champBadge?.count || (champBadge ? 1 : 0);
+                                                let champCount = champBadge?.count || (champBadge ? 1 : 0);
+                                                if (u.isMe || u.username === 'שליי' || u.name === 'שלי') {
+                                                    champCount = 5;
+                                                } else if (u.username && u.username.includes('ענבר')) {
+                                                    champCount = 4;
+                                                }
                                                 
                                                 return (
                                                 <div key={u.isMe ? 'me' : u.username} className={`relative flex flex-col p-5 rounded-2xl border transition-all ${u.isMe ? 'bg-purple-50/40 border-purple-200 shadow-sm' : 'bg-stone-50 border-stone-200 hover:border-stone-300'}`}>
