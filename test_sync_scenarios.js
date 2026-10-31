@@ -137,4 +137,30 @@ console.log('Running StudyStreak Sync Tests...');
     console.log('[PASS] Scenario 3: Independent offline actions on both devices merged losslessly!');
 }
 
+// SCENARIO 4: WhatsApp Weekly Report Single-Send Invariant
+// Computer sent report for '2026-W44'. Phone had stale state with empty report week.
+// When phone syncs, it must NOT erase the '2026-W44' marker or sent timestamp!
+{
+    const stalePhone = {
+        name: 'שלי',
+        lastSync: 5000,
+        lastWeeklyReportSentWeek: '',
+        lastWeeklyReportSentTime: 0,
+        tasks: []
+    };
+
+    const updatedComputer = {
+        name: 'שלי',
+        lastSync: 4000,
+        lastWeeklyReportSentWeek: '2026-W44',
+        lastWeeklyReportSentTime: 1793471000000,
+        tasks: []
+    };
+
+    const merged = sync.mergeUserData(stalePhone, updatedComputer);
+    assert.strictEqual(merged.lastWeeklyReportSentWeek, '2026-W44', 'Must keep week 44 report marker!');
+    assert.strictEqual(merged.lastWeeklyReportSentTime, 1793471000000, 'Must keep sent timestamp!');
+    console.log('[PASS] Scenario 4: WhatsApp weekly report marker preserved across stale devices!');
+}
+
 console.log('ALL TESTS PASSED SUCCESSFULLY! 🚀');

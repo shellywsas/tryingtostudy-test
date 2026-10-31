@@ -260,6 +260,8 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             },
             autoSendParentReport: true,
             lastWeeklyReportSentWeek: '',
+            lastWeeklyReportSentTime: 0,
+            sendReportToPrimaryParentOnly: false,
             lastTaskRemindersSent: {},
             notifications: [],
             badges: [] 

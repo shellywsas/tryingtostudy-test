@@ -311,6 +311,21 @@
         const mergedTotalPoints = Math.max(Number(local.totalPoints) || 0, Number(remote.totalPoints) || 0);
         const mergedWeeklyPoints = Math.max(Number(local.weeklyPoints) || 0, Number(remote.weeklyPoints) || 0);
 
+        // WhatsApp Automation Invariants: Never wipe out sent markers from stale tabs/devices
+        const localWeek = local.lastWeeklyReportSentWeek || '';
+        const remoteWeek = remote.lastWeeklyReportSentWeek || '';
+        const mergedWeeklyReportSentWeek = (localWeek.localeCompare(remoteWeek) >= 0 && localWeek !== '')
+            ? localWeek
+            : (remoteWeek || localWeek || '');
+        const mergedWeeklyReportSentTime = Math.max(
+            Number(local.lastWeeklyReportSentTime) || 0,
+            Number(remote.lastWeeklyReportSentTime) || 0
+        );
+        const mergedGlobalReminderSent = Math.max(
+            Number(local.lastGlobalWhatsAppReminderSent) || 0,
+            Number(remote.lastGlobalWhatsAppReminderSent) || 0
+        );
+
         // Scalar preferences: take from whichever is newer for user settings
         const preferRemote = remoteSync >= localSync;
         const base = preferRemote ? { ...local, ...remote } : { ...remote, ...local };
@@ -326,6 +341,9 @@
             currentStreakEmojis: mergedStreakEmojis,
             totalPoints: mergedTotalPoints,
             weeklyPoints: mergedWeeklyPoints,
+            lastWeeklyReportSentWeek: mergedWeeklyReportSentWeek,
+            lastWeeklyReportSentTime: mergedWeeklyReportSentTime,
+            lastGlobalWhatsAppReminderSent: mergedGlobalReminderSent,
             badges: mergedBadges,
             exams: mergedExams,
             deletedTaskIds: mergedDeletedTaskIds,

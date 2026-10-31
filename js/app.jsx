@@ -1321,6 +1321,33 @@ function App() {
             };
 
             const handleSendParentWeeklyReportWhatsApp = (silent = false) => {
+                const currentWeek = getWeekIdentifier();
+                const nowMs = Date.now();
+
+                // 1. Guard against duplicate sending when called automatically or rapidly
+                if (window.__parentWeeklyReportSending) {
+                    console.log('[WhatsApp Report] Already sending in-flight, skipping.');
+                    return;
+                }
+
+                const lastSentTime = Number(activeUserData?.lastWeeklyReportSentTime) || 0;
+                const hoursSinceLastSent = (nowMs - lastSentTime) / (1000 * 60 * 60);
+
+                // If automated (silent), strictly enforce single send per week + 72h minimum cooldown
+                if (silent) {
+                    if (activeUserData?.lastWeeklyReportSentWeek === currentWeek || hoursSinceLastSent < 72) {
+                        console.log('[WhatsApp Report] Weekly report already sent for this week or within 72h cooldown, skipping.');
+                        return;
+                    }
+                    try {
+                        const localSentKey = 'studystreak_weekly_report_sent_' + (activeUserData?.name || 'user') + '_' + currentWeek;
+                        if (localStorage.getItem(localSentKey)) {
+                            console.log('[WhatsApp Report] LocalStorage indicates already sent for week', currentWeek, 'skipping.');
+                            return;
+                        }
+                    } catch (e) {}
+                }
+
                 const p1 = activeUserData?.parentPhoneNumber?.trim();
                 const p2 = activeUserData?.parentPhoneNumber2?.trim();
 
@@ -1338,28 +1365,44 @@ function App() {
                     return;
                 }
 
-                const messageText = WhatsAppService.generateParentReportText(activeUserData.name || 'שלי', reportData);
-                const recipients = [p1, p2].filter(Boolean);
+                // Lock immediately in-memory and in localStorage
+                window.__parentWeeklyReportSending = true;
+                try {
+                    const localSentKey = 'studystreak_weekly_report_sent_' + (activeUserData?.name || 'user') + '_' + currentWeek;
+                    localStorage.setItem(localSentKey, String(nowMs));
+                } catch (e) {}
 
-                recipients.forEach(phone => {
-                    WhatsAppService.sendMessage({
+                // Immediately update state and cloud before triggering network calls
+                updateUserData(prev => ({
+                    ...prev,
+                    lastWeeklyReportSentWeek: currentWeek,
+                    lastWeeklyReportSentTime: nowMs
+                }));
+
+                const messageText = WhatsAppService.generateParentReportText(activeUserData.name || 'שלי', reportData);
+
+                // Check recipient preference: Send to primary parent only or both
+                const recipients = (activeUserData?.sendReportToPrimaryParentOnly)
+                    ? [p1 || p2].filter(Boolean)
+                    : [p1, p2].filter(Boolean);
+
+                Promise.allSettled(recipients.map(phone => {
+                    return WhatsAppService.sendMessage({
                         to: phone,
                         message: messageText,
                         gatewayConfig: activeUserData.whatsappGateway
                     }).catch(err => console.error('Error sending parent report to:', phone, err));
+                })).finally(() => {
+                    setTimeout(() => {
+                        window.__parentWeeklyReportSending = false;
+                    }, 20000);
                 });
-
-                const currentWeek = getWeekIdentifier();
-                updateUserData(prev => ({
-                    ...prev,
-                    lastWeeklyReportSentWeek: currentWeek
-                }));
 
                 if (!silent) {
                     if (activeUserData?.whatsappGateway?.instanceId) {
-                        showToast(`דוח שבועי נשלח אוטומטית לוואטסאפ של ${recipients.length > 1 ? 'שני ההורים' : 'ההורים'}! 📨🚀`, 'success');
+                        showToast(`דוח שבועי נשלח אוטומטית לוואטסאפ של ${recipients.length > 1 ? 'שני ההורים' : 'ההורה'}! 📨🚀`, 'success');
                     } else {
-                        showToast(`נפתח וואטסאפ לשליחת הדוח השבועי להורים 📲`, 'info');
+                        showToast(`נפתח וואטסאפ לשליחת הדוח השבועי 📲`, 'info');
                     }
                 }
             };
@@ -1444,14 +1487,22 @@ function App() {
                     const hour = now.getHours();
                     const currentWeek = getWeekIdentifier(now);
 
-                    // 1. שליחת דוח הורים במוצאי שבת (החל מ-19:00) או בראשון בבוקר
+                    // 1. שליחת דוח הורים במוצאי שבת (החל מ-19:00) או בראשון בבוקר - מוגן בהרמטיות מפני שליחה כפולה
                     const isSaturdayEveningOrSunday = (day === 6 && hour >= 19) || (day === 0 && hour < 14);
                     const alreadySentThisWeek = activeUserData.lastWeeklyReportSentWeek === currentWeek;
+                    const lastSentTime = Number(activeUserData.lastWeeklyReportSentTime) || 0;
+                    const hoursSinceLastSent = (now.getTime() - lastSentTime) / (1000 * 60 * 60);
                     const autoSendEnabled = activeUserData.autoSendParentReport !== false;
 
-                    if (isSaturdayEveningOrSunday && !alreadySentThisWeek && autoSendEnabled) {
+                    let localAlreadySent = false;
+                    try {
+                        const localSentKey = 'studystreak_weekly_report_sent_' + (activeUserData.name || 'user') + '_' + currentWeek;
+                        if (localStorage.getItem(localSentKey)) localAlreadySent = true;
+                    } catch (e) {}
+
+                    if (isSaturdayEveningOrSunday && !alreadySentThisWeek && !localAlreadySent && hoursSinceLastSent >= 72 && autoSendEnabled) {
                         const hasParent = activeUserData.parentPhoneNumber || activeUserData.parentPhoneNumber2;
-                        if (hasParent) {
+                        if (hasParent && !window.__parentWeeklyReportSending) {
                             console.log('Sending automatic Saturday evening parent report via WhatsApp...');
                             handleSendParentWeeklyReportWhatsApp(true);
                         }
@@ -1489,7 +1540,7 @@ function App() {
                 runWhatsAppAutomationCheck();
                 const intervalId = setInterval(runWhatsAppAutomationCheck, 10 * 60 * 1000);
                 return () => clearInterval(intervalId);
-            }, [activeUserData?.whatsappGateway?.instanceId, activeUserData?.lastWeeklyReportSentWeek, activeUserData?.tasks, activeUserData?.scheduleSettings]);
+            }, [activeUserData?.whatsappGateway?.instanceId, activeUserData?.lastWeeklyReportSentWeek, activeUserData?.lastWeeklyReportSentTime, activeUserData?.tasks, activeUserData?.scheduleSettings]);
 
             const [liveFriends, setLiveFriends] = useState({});
             
@@ -6587,18 +6638,47 @@ function App() {
                                                 </div>
                                             </div>
 
-                                            <label className="flex items-center gap-3 p-3 bg-emerald-50/60 rounded-xl cursor-pointer hover:bg-emerald-50 transition-colors border border-emerald-100">
-                                                <input 
-                                                    type="checkbox"
-                                                    checked={activeUserData.autoSendParentReport !== false}
-                                                    onChange={(e) => updateUserData({ autoSendParentReport: e.target.checked })}
-                                                    className="w-4 h-4 text-emerald-600 rounded accent-emerald-600"
-                                                />
-                                                <div className="text-xs text-stone-700">
-                                                    <span className="font-bold block">שליחה אוטומטית של דוח שבועי בכל מוצאי שבת 🗓️</span>
-                                                    <span className="text-stone-500">המערכת תסכם אוטומטית את כל המשימות, שעות הלמידה וההתמדה ותשלח לשני ההורים בימי שבת בערב.</span>
-                                                </div>
-                                            </label>
+                                            <div className="p-3 bg-emerald-50/60 rounded-xl border border-emerald-100 space-y-2">
+                                                <label className="flex items-center gap-3 cursor-pointer">
+                                                    <input 
+                                                        type="checkbox"
+                                                        checked={activeUserData.autoSendParentReport !== false}
+                                                        onChange={(e) => updateUserData({ autoSendParentReport: e.target.checked })}
+                                                        className="w-4 h-4 text-emerald-600 rounded accent-emerald-600"
+                                                    />
+                                                    <div className="text-xs text-stone-700">
+                                                        <span className="font-bold block">שליחה אוטומטית של דוח שבועי בכל מוצאי שבת 🗓️</span>
+                                                        <span className="text-stone-500">המערכת תסכם אוטומטית את כל המשימות, שעות הלמידה וההתמדה ותשלח דוח מסודר אחד בימי שבת בערב.</span>
+                                                    </div>
+                                                </label>
+                                                {activeUserData.parentPhoneNumber && activeUserData.parentPhoneNumber2 && (
+                                                    <div className="pt-2 border-t border-emerald-200/50 flex flex-wrap items-center justify-between text-xs gap-2">
+                                                        <span className="text-stone-700 font-semibold">נמעני הדוח השבועי בוואטסאפ:</span>
+                                                        <div className="flex items-center gap-4">
+                                                            <label className="flex items-center gap-1.5 cursor-pointer">
+                                                                <input 
+                                                                    type="radio" 
+                                                                    name="reportRecipients" 
+                                                                    checked={!activeUserData.sendReportToPrimaryParentOnly} 
+                                                                    onChange={() => updateUserData({ sendReportToPrimaryParentOnly: false })}
+                                                                    className="accent-emerald-600"
+                                                                />
+                                                                <span className="text-stone-600">שני ההורים (הורה 1 + הורה 2)</span>
+                                                            </label>
+                                                            <label className="flex items-center gap-1.5 cursor-pointer">
+                                                                <input 
+                                                                    type="radio" 
+                                                                    name="reportRecipients" 
+                                                                    checked={!!activeUserData.sendReportToPrimaryParentOnly} 
+                                                                    onChange={() => updateUserData({ sendReportToPrimaryParentOnly: true })}
+                                                                    className="accent-emerald-600"
+                                                                />
+                                                                <span className="text-stone-600">הורה 1 בלבד (הודעה אחת)</span>
+                                                            </label>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
 
