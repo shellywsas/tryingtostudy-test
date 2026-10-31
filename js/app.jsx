@@ -33,12 +33,49 @@ function App() {
             });
             const pendingWriteSync = useRef(0);
             const hasRemoteSynced = useRef(false);
+            const isServerSynced = useRef(false);
 
             // Cloud Sync Status & Outbox Diagnostics State
             const [syncState, setSyncState] = useState(() => (typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'synced'));
             const [syncErrorDetails, setSyncErrorDetails] = useState('');
             const [isSyncDiagnosticsOpen, setIsSyncDiagnosticsOpen] = useState(false);
             const [editingExam, setEditingExam] = useState(null);
+
+            // Multi-Tab & Multi-Window Instant Synchronization Channel (0ms delay)
+            useEffect(() => {
+                if (typeof BroadcastChannel === 'undefined') return;
+                let bc = null;
+                try {
+                    bc = new BroadcastChannel('studystreak_channel');
+                    window.__studyStreakBroadcast = bc;
+                    bc.onmessage = (event) => {
+                        if (event.data && event.data.type === 'LOCAL_SYNC' && event.data.activeUser && event.data.user) {
+                            setGlobalState(prev => {
+                                if (prev.activeUser !== event.data.activeUser) return prev;
+                                const current = prev.users[prev.activeUser];
+                                const merged = typeof mergeUserData === 'function' ? mergeUserData(current, event.data.user) : { ...current, ...event.data.user };
+                                const healed = typeof healCompletedFromHistory === 'function' ? healCompletedFromHistory(merged) : merged;
+                                if (current && JSON.stringify(current) === JSON.stringify(healed)) return prev;
+                                return {
+                                    ...prev,
+                                    users: {
+                                        ...prev.users,
+                                        [prev.activeUser]: healed
+                                    }
+                                };
+                            });
+                        }
+                    };
+                } catch (e) {
+                    console.warn('BroadcastChannel init warning:', e);
+                }
+                return () => {
+                    if (bc) {
+                        bc.close();
+                        window.__studyStreakBroadcast = null;
+                    }
+                };
+            }, []);
 
             // Safety snapshot backup before first remote sync session
             useEffect(() => {
@@ -49,12 +86,13 @@ function App() {
                 } catch (e) {}
             }, [globalState.activeUser]);
 
+            // Reset remote sync tracking on activeUser change & trigger active server fetch
             useEffect(() => {
                 hasRemoteSynced.current = false;
-                const timeout = setTimeout(() => {
-                    hasRemoteSynced.current = true;
-                }, 3500);
-                return () => clearTimeout(timeout);
+                isServerSynced.current = false;
+                if (globalState.activeUser) {
+                    forceSyncFromServer(true);
+                }
             }, [globalState.activeUser]);
 
 
@@ -63,7 +101,50 @@ function App() {
             }, [globalState]);
 
 
-            // Live Firestore Snapshot with error diagnosis
+            // Active server-direct pull to guarantee real-time cross-device sync without WebSocket latency
+            const forceSyncFromServer = async (silent = true) => {
+                if (!db || !globalState.activeUser || (typeof navigator !== 'undefined' && !navigator.onLine)) return false;
+                try {
+                    const userRef = db.collection("users").doc(globalState.activeUser);
+                    let docSnap = null;
+                    try {
+                        // Force read directly from server, bypassing stale client cache
+                        docSnap = await userRef.get({ source: 'server' });
+                    } catch (e) {
+                        docSnap = await userRef.get();
+                    }
+                    if (docSnap && docSnap.exists) {
+                        const remoteData = docSnap.data();
+                        hasRemoteSynced.current = true;
+                        isServerSynced.current = true;
+                        setGlobalState(prev => {
+                            const currentUserData = prev.users[prev.activeUser];
+                            const merged = typeof mergeUserData === 'function' 
+                                ? mergeUserData(currentUserData, remoteData, pendingWriteSync.current)
+                                : applyRemoteUser(currentUserData, remoteData, pendingWriteSync.current);
+                            const healed = typeof healCompletedFromHistory === 'function'
+                                ? healCompletedFromHistory(merged || remoteData)
+                                : (merged || remoteData);
+                            if (currentUserData && JSON.stringify(currentUserData) === JSON.stringify(healed)) return prev;
+                            return {
+                                ...prev,
+                                users: {
+                                    ...prev.users,
+                                    [prev.activeUser]: healed
+                                }
+                            };
+                        });
+                        setSyncState('synced');
+                        setSyncErrorDetails('');
+                        return true;
+                    }
+                } catch (err) {
+                    if (!silent) console.warn("forceSyncFromServer error:", err);
+                }
+                return false;
+            };
+
+            // Live Firestore Snapshot with error diagnosis & lossless merge
             useEffect(() => {
                 if (!globalState.activeUser || !db) {
                     if (!db) setSyncState(navigator.onLine ? 'error' : 'offline');
@@ -74,6 +155,9 @@ function App() {
                 
                 const unsubscribe = userRef.onSnapshot((doc) => {
                     hasRemoteSynced.current = true;
+                    if (!doc.metadata?.fromCache) {
+                        isServerSynced.current = true;
+                    }
                     setSyncState('synced');
                     setSyncErrorDetails('');
                     if (doc.exists) {
@@ -81,8 +165,12 @@ function App() {
                         
                         setGlobalState(prev => {
                             const currentUserData = prev.users[prev.activeUser];
-                            const applied = applyRemoteUser(currentUserData, liveData, pendingWriteSync.current);
-                            const healed = healCompletedFromHistory(applied || liveData);
+                            const applied = typeof mergeUserData === 'function'
+                                ? mergeUserData(currentUserData, liveData, pendingWriteSync.current)
+                                : applyRemoteUser(currentUserData, liveData, pendingWriteSync.current);
+                            const healed = typeof healCompletedFromHistory === 'function'
+                                ? healCompletedFromHistory(applied || liveData)
+                                : (applied || liveData);
                             if (currentUserData && JSON.stringify(currentUserData) === JSON.stringify(healed)) return prev;
                             return {
                                 ...prev,
@@ -105,7 +193,7 @@ function App() {
                 return () => unsubscribe();
             }, [globalState.activeUser]);
 
-            // Manual & Continuous Cloud Push for Outbox Queue
+            // Manual & Continuous Cloud Push for Outbox Queue (Safely Merging with Cloud First!)
             const pushPendingSyncToCloud = async (forceUser = null) => {
                 const targetUser = forceUser || globalState.activeUser;
                 if (!targetUser || !db) return false;
@@ -117,6 +205,21 @@ function App() {
                         setSyncState('synced');
                         return true;
                     }
+
+                    // CRITICAL: Fetch current server document and merge with pending data before saving
+                    // This guarantees we NEVER overwrite recent progress from another device!
+                    try {
+                        const remoteDoc = await db.collection("users").doc(targetUser).get();
+                        if (remoteDoc.exists) {
+                            const remoteData = remoteDoc.data();
+                            userToUpload = typeof mergeUserData === 'function'
+                                ? mergeUserData(userToUpload, remoteData)
+                                : { ...remoteData, ...userToUpload };
+                        }
+                    } catch (fetchErr) {
+                        console.warn('Pre-push remote merge warning (offline):', fetchErr);
+                    }
+
                     if (Array.isArray(userToUpload.deletedTaskIds) && userToUpload.deletedTaskIds.length > 0 && Array.isArray(userToUpload.tasks)) {
                         const delSet = new Set(userToUpload.deletedTaskIds);
                         userToUpload = {
@@ -150,11 +253,11 @@ function App() {
                 }
             };
 
-            // Continuous Background Health Check (Every 35 seconds + Focus + Online)
+            // Multi-Device Continuous Sentinel Guard (Active poll every 8s + Instant wake on Visibility/Focus/Online)
             useEffect(() => {
                 if (!globalState.activeUser) return;
 
-                const runHealthCheck = async () => {
+                const runMultiDeviceSentinel = async () => {
                     if (!navigator.onLine) {
                         setSyncState('offline');
                         return;
@@ -165,65 +268,61 @@ function App() {
                         return;
                     }
 
-                    // 1. Drain pending outbox changes if any
+                    // 1. Drain pending outbox changes if any (safely merged!)
                     const pending = typeof getPendingSync === 'function' ? getPendingSync(globalState.activeUser) : null;
                     if (pending) {
                         await pushPendingSyncToCloud();
-                        return;
                     }
 
-                    // 2. Probe read permission
-                    try {
-                        await db.collection("users").doc(globalState.activeUser).get();
-                        setSyncState(prev => prev === 'error' ? 'synced' : prev);
-                        setSyncErrorDetails('');
-                    } catch (err) {
-                        const isPerm = err.code === 'permission-denied' || String(err.message).includes('permission');
-                        setSyncState('error');
-                        if (isPerm) {
-                            setSyncErrorDetails('חוקי האבטחה ב-Firebase פגו (Permission Denied)');
-                        }
-                    }
+                    // 2. Proactive server sync: fetch latest document and lossless-merge
+                    await forceSyncFromServer(true);
                 };
 
-                runHealthCheck();
-                const interval = setInterval(runHealthCheck, 35000);
+                runMultiDeviceSentinel();
+                // Check every 8 seconds for real-time background sync across computer, phone, tablet
+                const interval = setInterval(runMultiDeviceSentinel, 8000);
 
                 const onOnline = () => {
                     setSyncState('syncing');
-                    runHealthCheck();
+                    runMultiDeviceSentinel();
                     showToast('חיבור האינטרנט חזר! מסנכרן שינויים לענן... 🔄', 'info');
                 };
                 const onOffline = () => {
                     setSyncState('offline');
                 };
-                const onFocus = () => {
-                    runHealthCheck();
+                const onWakeOrFocus = () => {
+                    // Mobile & tablet instant wake detection (when screen turns on or user returns to tab)
+                    if (document.visibilityState === 'visible' || document.hasFocus()) {
+                        runMultiDeviceSentinel();
+                    }
                 };
 
                 window.addEventListener('online', onOnline);
                 window.addEventListener('offline', onOffline);
-                window.addEventListener('focus', onFocus);
-                document.addEventListener('visibilitychange', onFocus);
+                window.addEventListener('focus', onWakeOrFocus);
+                window.addEventListener('pageshow', onWakeOrFocus);
+                document.addEventListener('visibilitychange', onWakeOrFocus);
 
                 return () => {
                     clearInterval(interval);
                     window.removeEventListener('online', onOnline);
                     window.removeEventListener('offline', onOffline);
-                    window.removeEventListener('focus', onFocus);
-                    document.removeEventListener('visibilitychange', onFocus);
+                    window.removeEventListener('focus', onWakeOrFocus);
+                    window.removeEventListener('pageshow', onWakeOrFocus);
+                    document.removeEventListener('visibilitychange', onWakeOrFocus);
                 };
             }, [globalState.activeUser]);
 
             const activeUserData = globalState.activeUser ? globalState.users[globalState.activeUser] : null;
 
             useEffect(() => {
-                if (!activeUserData) return;
+                // Guard: NEVER trigger cloud updates from stale startup state before remote sync completes
+                if (!activeUserData || !hasRemoteSynced.current) return;
                 const healed = healCompletedFromHistory(activeUserData);
-                if (healed !== activeUserData) {
+                if (healed !== activeUserData && JSON.stringify(healed) !== JSON.stringify(activeUserData)) {
                     updateUserData(() => healed);
                 }
-            }, [globalState.activeUser]);
+            }, [globalState.activeUser, hasRemoteSynced.current]);
 
 
             const sanitizeForFirestore = (obj) => {
@@ -249,6 +348,17 @@ function App() {
                     if (typeof markPendingSync === 'function') {
                         markPendingSync(prev.activeUser, updatedUser);
                     }
+
+                    // Multi-Tab local broadcast (0ms sync between open tabs)
+                    try {
+                        if (window.__studyStreakBroadcast) {
+                            window.__studyStreakBroadcast.postMessage({
+                                type: 'LOCAL_SYNC',
+                                activeUser: prev.activeUser,
+                                user: updatedUser
+                            });
+                        }
+                    } catch (e) {}
 
                     if (db) {
                         setSyncState('syncing');

@@ -52,7 +52,9 @@
                 autoPenaltyApplied: onTime ? false : (base.autoPenaltyApplied || false)
             };
         }
-        return { ...localT, ...incomingT };
+        const localMod = localT.updatedAt || localT.lastModified || localT.createdAt || 0;
+        const incomingMod = incomingT.updatedAt || incomingT.lastModified || incomingT.createdAt || 0;
+        return incomingMod >= localMod ? { ...localT, ...incomingT } : { ...incomingT, ...localT };
     }
 
     function mergeExams(localExams, remoteExams) {
@@ -176,56 +178,164 @@
         } catch (e) {}
     }
 
-    function applyRemoteUser(local, remote, tabWrittenSync) {
+    function mergePointsHistory(localHist, remoteHist) {
+        const listA = Array.isArray(localHist) ? localHist : [];
+        const listB = Array.isArray(remoteHist) ? remoteHist : [];
+        const map = new Map();
+        for (const item of [...listB, ...listA]) {
+            if (!item) continue;
+            const key = item.id ? String(item.id) : (item.taskId && item.date ? `${item.taskId}_${item.date}` : null);
+            if (!key) continue;
+            if (!map.has(key)) {
+                map.set(key, item);
+            } else {
+                const existing = map.get(key);
+                map.set(key, { ...existing, ...item });
+            }
+        }
+        const merged = Array.from(map.values());
+        merged.sort((a, b) => {
+            const timeA = a.date ? new Date(a.date).getTime() : 0;
+            const timeB = b.date ? new Date(b.date).getTime() : 0;
+            return timeB - timeA;
+        });
+        return merged;
+    }
+
+    function mergeStreakHistory(localStreaks, remoteStreaks) {
+        const listA = Array.isArray(localStreaks) ? localStreaks : [];
+        const listB = Array.isArray(remoteStreaks) ? remoteStreaks : [];
+        const map = new Map();
+        for (const item of [...listB, ...listA]) {
+            if (!item) continue;
+            const key = item.id ? String(item.id) : (item.startDate && item.endDate ? `${item.startDate}_${item.endDate}` : null);
+            if (!key) continue;
+            if (!map.has(key)) {
+                map.set(key, item);
+            } else {
+                const existing = map.get(key);
+                map.set(key, { ...existing, ...item });
+            }
+        }
+        const merged = Array.from(map.values());
+        merged.sort((a, b) => {
+            const timeA = a.endDate ? new Date(a.endDate).getTime() : 0;
+            const timeB = b.endDate ? new Date(b.endDate).getTime() : 0;
+            return timeB - timeA;
+        });
+        return merged;
+    }
+
+    function verifyAndRepairStreakAndTasks(user) {
+        if (!user || !Array.isArray(user.tasks)) return user;
+        const hist = Array.isArray(user.pointsHistory) ? user.pointsHistory : [];
+        let changed = false;
+        let tasks = [...user.tasks];
+        let taskStreak = user.taskStreak;
+        let longestStreak = user.longestStreak || 0;
+
+        tasks = tasks.map(t => {
+            if (!t) return t;
+            if (!t.completed && taskLooksCompleted(t, hist)) {
+                changed = true;
+                return { ...t, completed: true, autoPenaltyApplied: isTaskSubmittedOnTime(t) ? false : (t.autoPenaltyApplied || false) };
+            }
+            return t;
+        });
+
+        if ((taskStreak === 0 || taskStreak === undefined) && longestStreak > 0) {
+            const hasActiveBreak = Array.isArray(user.streakHistory) && user.streakHistory.length > 0;
+            if (!hasActiveBreak) {
+                taskStreak = longestStreak;
+                changed = true;
+            }
+        }
+
+        if (!changed) return user;
+        return {
+            ...user,
+            tasks,
+            taskStreak: taskStreak !== undefined ? taskStreak : (user.taskStreak || 0),
+            longestStreak: Math.max(longestStreak, taskStreak || 0)
+        };
+    }
+
+    function mergeUserData(local, remote, tabWrittenSync) {
         if (!remote) return local;
         if (!local) return remote;
-        const remoteSync = remote.lastSync || 0;
-        const localSync = local.lastSync || 0;
+
+        const remoteSync = Number(remote.lastSync) || 0;
+        const localSync = Number(local.lastSync) || 0;
+
         const mergedBadges = mergeBadges(local.badges, remote.badges);
         const mergedExams = mergeExams(local.exams || [], remote.exams || []);
         const mergedDeletedTaskIds = Array.from(new Set([
             ...(Array.isArray(local.deletedTaskIds) ? local.deletedTaskIds : []),
             ...(Array.isArray(remote.deletedTaskIds) ? remote.deletedTaskIds : [])
         ]));
+        const mergedDeletedExamIds = Array.from(new Set([
+            ...(Array.isArray(local.deletedExamIds) ? local.deletedExamIds : []),
+            ...(Array.isArray(remote.deletedExamIds) ? remote.deletedExamIds : [])
+        ]));
 
-        if (tabWrittenSync && remoteSync && remoteSync <= tabWrittenSync) {
-            return { 
-                ...local, 
-                badges: mergedBadges, 
-                exams: mergedExams,
-                deletedTaskIds: mergedDeletedTaskIds,
-                tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
-            };
+        const mergedPointsHistory = mergePointsHistory(local.pointsHistory, remote.pointsHistory);
+        const mergedTasks = mergeTasks(local.tasks || [], remote.tasks || [], mergedPointsHistory, mergedDeletedTaskIds);
+        const mergedStreakHistory = mergeStreakHistory(local.streakHistory, remote.streakHistory);
+
+        // Streak Count Invariant: Never lose streak progress due to stale device syncing
+        const localStreak = Number(local.taskStreak) || 0;
+        const remoteStreak = Number(remote.taskStreak) || 0;
+        const mergedTaskStreak = Math.max(localStreak, remoteStreak);
+
+        const localLongest = Number(local.longestStreak) || 0;
+        const remoteLongest = Number(remote.longestStreak) || 0;
+        const mergedLongestStreak = Math.max(localLongest, remoteLongest, mergedTaskStreak);
+
+        let mergedStreakStart = local.currentStreakStart || remote.currentStreakStart || null;
+        if (local.currentStreakStart && remote.currentStreakStart) {
+            const timeLocal = new Date(local.currentStreakStart).getTime();
+            const timeRemote = new Date(remote.currentStreakStart).getTime();
+            if (!isNaN(timeLocal) && !isNaN(timeRemote)) {
+                mergedStreakStart = timeLocal <= timeRemote ? local.currentStreakStart : remote.currentStreakStart;
+            }
         }
-        if (!remoteSync && localSync) return { 
-            ...local, 
-            badges: mergedBadges, 
-            exams: mergedExams,
-            deletedTaskIds: mergedDeletedTaskIds,
-            tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
-        };
-        if (remoteSync && localSync && remoteSync < localSync) return { 
-            ...local, 
-            badges: mergedBadges, 
-            exams: mergedExams,
-            deletedTaskIds: mergedDeletedTaskIds,
-            tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
-        };
-        if (remoteSync && localSync && remoteSync === localSync) return { 
-            ...local, 
-            badges: mergedBadges, 
-            exams: mergedExams,
-            deletedTaskIds: mergedDeletedTaskIds,
-            tasks: (local.tasks || []).filter(t => t && !mergedDeletedTaskIds.includes(t.id))
-        };
-        const hist = local.pointsHistory || remote.pointsHistory || [];
-        return {
-            ...remote,
+
+        const mergedStreakEmojis = Array.from(new Set([
+            ...(Array.isArray(local.currentStreakEmojis) ? local.currentStreakEmojis : []),
+            ...(Array.isArray(remote.currentStreakEmojis) ? remote.currentStreakEmojis : [])
+        ]));
+
+        // Points Invariant: Never decrease points due to stale device syncing
+        const mergedTotalPoints = Math.max(Number(local.totalPoints) || 0, Number(remote.totalPoints) || 0);
+        const mergedWeeklyPoints = Math.max(Number(local.weeklyPoints) || 0, Number(remote.weeklyPoints) || 0);
+
+        // Scalar preferences: take from whichever is newer for user settings
+        const preferRemote = remoteSync >= localSync;
+        const base = preferRemote ? { ...local, ...remote } : { ...remote, ...local };
+
+        const result = {
+            ...base,
+            tasks: mergedTasks,
+            pointsHistory: mergedPointsHistory,
+            streakHistory: mergedStreakHistory,
+            taskStreak: mergedTaskStreak,
+            longestStreak: mergedLongestStreak,
+            currentStreakStart: mergedStreakStart,
+            currentStreakEmojis: mergedStreakEmojis,
+            totalPoints: mergedTotalPoints,
+            weeklyPoints: mergedWeeklyPoints,
             badges: mergedBadges,
             exams: mergedExams,
             deletedTaskIds: mergedDeletedTaskIds,
-            tasks: mergeTasks(local.tasks || [], remote.tasks || [], hist, mergedDeletedTaskIds),
+            deletedExamIds: mergedDeletedExamIds,
+            lastSync: Math.max(localSync, remoteSync, Date.now())
         };
+
+        return healCompletedFromHistory(result);
+    }
+
+    function applyRemoteUser(local, remote, tabWrittenSync) {
+        return mergeUserData(local, remote, tabWrittenSync);
     }
 
     function healCompletedFromHistory(user) {
@@ -443,6 +553,10 @@
         mergeTasks,
         mergeExams,
         applyRemoteUser,
+        mergeUserData,
+        mergePointsHistory,
+        mergeStreakHistory,
+        verifyAndRepairStreakAndTasks,
         healCompletedFromHistory,
         restoreOnDueEdit,
         taskLooksCompleted,
@@ -462,6 +576,10 @@
     root.mergeTasks = mergeTasks;
     root.mergeExams = mergeExams;
     root.applyRemoteUser = applyRemoteUser;
+    root.mergeUserData = mergeUserData;
+    root.mergePointsHistory = mergePointsHistory;
+    root.mergeStreakHistory = mergeStreakHistory;
+    root.verifyAndRepairStreakAndTasks = verifyAndRepairStreakAndTasks;
     root.healCompletedFromHistory = healCompletedFromHistory;
     root.restoreOnDueEdit = restoreOnDueEdit;
     root.taskLooksCompleted = taskLooksCompleted;
