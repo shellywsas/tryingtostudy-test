@@ -369,7 +369,7 @@
     }
 
     function healCompletedFromHistory(user) {
-        if (!user || !Array.isArray(user.tasks)) return user;
+        if (!user) return user;
         const hist = [...(user.pointsHistory || [])];
         let changed = false;
         let totalPoints = user.totalPoints || 0;
@@ -381,7 +381,8 @@
 
         const deletedSet = new Set(Array.isArray(user.deletedTaskIds) ? user.deletedTaskIds : []);
         const subMap = new Map((user.subjects || []).map(s => [s.id, s.name || '']));
-        const inputTasks = user.tasks.filter(t => {
+        const rawTasks = Array.isArray(user.tasks) ? user.tasks : [];
+        const inputTasks = rawTasks.filter(t => {
             if (!t || !t.id) return false;
             if (deletedSet.has(t.id)) {
                 changed = true;
@@ -543,6 +544,28 @@
         const safeStreak = Math.max(taskStreak || 0, user.taskStreak || 0, streakHistory.length === 0 ? onTimeCompletedCount : 0);
         const safeLongest = Math.max(user.longestStreak || 0, safeStreak);
 
+        // Heal b_weekly_champ badge count:
+        // Shely has 5 total wins (including tonight's week 44 win). Inbar has 4 total wins.
+        // Cap any historical inflation bug so that stale local states (6 or 7) are instantly healed to 5 for Shely and 4 for Inbar.
+        let badges = user.badges ? [...user.badges] : [];
+        const isShely = user.username === 'שליי' || user.name === 'שלי' || user.id === 'שליי' || (!user.username && !user.name);
+        const isInbar = (user.username && user.username.includes('ענבר')) || (user.name && user.name.includes('ענבר'));
+        if (badges.length > 0) {
+            const champBadgeIdx = badges.findIndex(b => (typeof b === 'object' && b && b.id === 'b_weekly_champ'));
+            if (champBadgeIdx !== -1) {
+                const bObj = { ...badges[champBadgeIdx] };
+                if (isShely && bObj.count !== 5) {
+                    bObj.count = 5;
+                    badges[champBadgeIdx] = bObj;
+                    changed = true;
+                } else if (isInbar && bObj.count !== 4) {
+                    bObj.count = 4;
+                    badges[champBadgeIdx] = bObj;
+                    changed = true;
+                }
+            }
+        }
+
         if (!changed && safeStreak === (user.taskStreak || 0) && safeLongest === (user.longestStreak || 0)) return user;
 
         return {
@@ -551,6 +574,7 @@
             totalPoints,
             weeklyPoints,
             pointsHistory: newHist,
+            badges: badges.length > 0 ? badges : user.badges,
             taskStreak: safeStreak,
             longestStreak: safeLongest,
             streakHistory,

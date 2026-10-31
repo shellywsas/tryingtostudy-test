@@ -163,4 +163,29 @@ console.log('Running StudyStreak Sync Tests...');
     console.log('[PASS] Scenario 4: WhatsApp weekly report marker preserved across stale devices!');
 }
 
+// SCENARIO 5: Badge Healing for Weekly Champion
+// Stale device has 7 crowns due to old bug. Healing must restore Shely to 5 and Inbar to 4.
+{
+    const staleShely = {
+        name: 'שלי',
+        username: 'שליי',
+        tasks: [],
+        badges: [{ id: 'b_weekly_champ', count: 7 }]
+    };
+    const healed = sync.healCompletedFromHistory(staleShely);
+    const champ = healed.badges.find(b => b.id === 'b_weekly_champ');
+    assert.strictEqual(champ.count, 5, 'Shely must be healed to 5 crowns!');
+
+    const staleInbar = {
+        name: 'ענבר❤️',
+        username: 'ענבר❤️',
+        tasks: [],
+        badges: [{ id: 'b_weekly_champ', count: 7 }]
+    };
+    const healedInbar = sync.healCompletedFromHistory(staleInbar);
+    const champInbar = healedInbar.badges.find(b => b.id === 'b_weekly_champ');
+    assert.strictEqual(champInbar.count, 4, 'Inbar must be healed to 4 crowns!');
+    console.log('[PASS] Scenario 5: Stale weekly champ badges correctly healed!');
+}
+
 console.log('ALL TESTS PASSED SUCCESSFULLY! 🚀');
