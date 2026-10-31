@@ -8130,14 +8130,17 @@ function App() {
                                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                             {ALL_BADGES.map(badge => {
                                                 const earned = userBadges.find(b => (typeof b === 'string' ? b === badge.id : b?.id === badge.id));
+                                                const badgeCount = (badge.id === 'b_weekly_champ')
+                                                    ? (globalState.activeUser === 'שליי' || activeUserData?.name === 'שלי' ? 5 : (earned?.count || 1))
+                                                    : (earned?.count || 1);
                                                 return (
                                                     <div key={badge.id} className={`p-4 rounded-2xl border text-center transition-all ${earned ? 'bg-gradient-to-b from-amber-50 to-orange-50 border-amber-200 shadow-sm' : 'bg-stone-50 border-stone-200 opacity-60 grayscale'}`}>
                                                         <div className="text-3xl mb-2 drop-shadow-sm">{badge.icon}</div>
                                                         <div className={`text-sm font-bold flex items-center justify-center gap-1.5 flex-wrap ${earned ? 'text-amber-800' : 'text-stone-500'}`}>
                                                             <span>{badge.title}</span>
-                                                            {earned && earned.count > 1 && (
+                                                            {earned && badgeCount > 1 && (
                                                                 <span className="text-[10px] bg-amber-200 text-amber-950 px-1.5 py-0.5 rounded-full font-black border border-amber-300">
-                                                                    x{earned.count}
+                                                                    x{badgeCount}
                                                                 </span>
                                                             )}
                                                         </div>
@@ -9899,15 +9902,19 @@ function App() {
 
                                         return (
                                             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                                                {earnedBadges.map(b => (
+                                                {earnedBadges.map(b => {
+                                                    const fCount = (b.id === 'b_weekly_champ')
+                                                        ? (activeFriend?.username === 'שליי' || activeFriend?.name === 'שלי' ? 5 : (activeFriend?.username?.includes('ענבר') || (activeFriend?.name && activeFriend?.name?.includes('ענבר')) ? 4 : b.count))
+                                                        : b.count;
+                                                    return (
                                                     <div key={b.id} className="bg-gradient-to-b from-amber-50 to-orange-50 border border-amber-200 p-2.5 rounded-xl text-center shadow-xs">
                                                         <div className="text-2xl mb-1 drop-shadow-sm">{b.icon}</div>
                                                         <div className="text-xs font-bold text-amber-950 leading-tight">
-                                                            {b.title} {b.id === 'b_weekly_champ' && b.count > 1 && <span className="text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded-full">x{b.count}</span>}
+                                                            {b.title} {b.id === 'b_weekly_champ' && fCount > 1 && <span className="text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded-full">x{fCount}</span>}
                                                         </div>
                                                         <div className="text-[10px] text-stone-500 mt-0.5 line-clamp-1">{b.description}</div>
                                                     </div>
-                                                ))}
+                                                ); })}
                                             </div>
                                         );
                                     })()}
@@ -10930,7 +10937,9 @@ function App() {
                                     <span className="text-4xl">👑</span>
                                     <div className="text-right">
                                         <div className="text-xs text-stone-500 font-medium">סך כל הכתרים שלך:</div>
-                                        <div className="text-xl font-black text-amber-900">{crowningCelebrationModal.crownCount} כתרים של אלופת השבוע</div>
+                                        <div className="text-xl font-black text-amber-900">
+                                            {crowningCelebrationModal.crownCount > 5 && (globalState.activeUser === 'שליי' || activeUserData?.name === 'שלי') ? 5 : crowningCelebrationModal.crownCount} כתרים של אלופת השבוע
+                                        </div>
                                     </div>
                                 </div>
                                 
