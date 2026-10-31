@@ -125,6 +125,19 @@ function App() {
                             const healed = typeof healCompletedFromHistory === 'function'
                                 ? healCompletedFromHistory(merged || remoteData)
                                 : (merged || remoteData);
+
+                            // If local had completed tasks or points that remote was missing, write back to Firestore immediately
+                            const remoteDone = (remoteData.tasks || []).filter(t => t && (t.completed || t.completedAt)).length;
+                            const healedDone = (healed.tasks || []).filter(t => t && (t.completed || t.completedAt)).length;
+                            const remoteHist = (remoteData.pointsHistory || []).length;
+                            const healedHist = (healed.pointsHistory || []).length;
+                            if (healedDone > remoteDone || healedHist > remoteHist || (healed.taskStreak || 0) > (remoteData.taskStreak || 0)) {
+                                try {
+                                    const clean = sanitizeForFirestore({ ...healed, lastSync: Date.now() });
+                                    userRef.set(clean, { merge: true });
+                                } catch (e) {}
+                            }
+
                             if (currentUserData && JSON.stringify(currentUserData) === JSON.stringify(healed)) return prev;
                             return {
                                 ...prev,
@@ -171,6 +184,19 @@ function App() {
                             const healed = typeof healCompletedFromHistory === 'function'
                                 ? healCompletedFromHistory(applied || liveData)
                                 : (applied || liveData);
+
+                            // If local had completed tasks or points that liveData was missing, write back to Firestore immediately
+                            const remoteDone = (liveData.tasks || []).filter(t => t && (t.completed || t.completedAt)).length;
+                            const healedDone = (healed.tasks || []).filter(t => t && (t.completed || t.completedAt)).length;
+                            const remoteHist = (liveData.pointsHistory || []).length;
+                            const healedHist = (healed.pointsHistory || []).length;
+                            if (healedDone > remoteDone || healedHist > remoteHist || (healed.taskStreak || 0) > (liveData.taskStreak || 0)) {
+                                try {
+                                    const clean = sanitizeForFirestore({ ...healed, lastSync: Date.now() });
+                                    userRef.set(clean, { merge: true });
+                                } catch (e) {}
+                            }
+
                             if (currentUserData && JSON.stringify(currentUserData) === JSON.stringify(healed)) return prev;
                             return {
                                 ...prev,
