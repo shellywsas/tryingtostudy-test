@@ -587,197 +587,125 @@ function App() {
                 return Math.max(histSum, taskSum);
             };
 
-            // Helper: evaluate historical weekly wins across all past completed weeks
-            const evaluateHistoricalWeeklyWins = (userData, friendsMap) => {
-                if (!userData) return 0;
-                const now = Date.now();
-                const tasks = userData.tasks || [];
-                const hist = userData.pointsHistory || [];
-                const allTimestamps = [
-                    ...tasks.map(t => t.completedAt ? new Date(t.completedAt).getTime() : 0),
-                    ...hist.map(h => h.date ? new Date(h.date).getTime() : 0)
-                ].filter(t => t > 0 && !isNaN(t));
-
-                if (allTimestamps.length === 0) return 0;
-                const earliestTime = Math.min(...allTimestamps);
-                const friendsArr = Object.values(friendsMap || {});
-
-                let winsCount = 0;
-                let satTime = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : now;
-                const oneWeekMs = 7 * 86400000;
-                let currentWeekEnd = satTime;
-
-                while (currentWeekEnd >= earliestTime) {
-                    const currentWeekStart = currentWeekEnd - oneWeekMs;
-                    const userPtsInWeek = calculatePointsInWindow(userData, currentWeekStart, currentWeekEnd);
-
-                    if (userPtsInWeek > 0) {
-                        let isTopInWeek = true;
-                        for (const f of friendsArr) {
-                            const fPtsInWeek = calculatePointsInWindow(f, currentWeekStart, currentWeekEnd);
-                            if (fPtsInWeek > userPtsInWeek) {
-                                isTopInWeek = false;
-                                break;
-                            }
-                        }
-                        if (isTopInWeek) {
-                            winsCount++;
-                        }
-                    }
-                    currentWeekEnd -= oneWeekMs;
-                }
-
-                return winsCount;
-            };
-
+            // Real-Time Weekly Crowning and Midnight Reset with 30s Sentinel
             useEffect(() => {
                 if (!activeUserData || !globalState.activeUser) return;
-                const now = new Date().getTime();
-                const lastSat22 = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
-                const nextSat22 = typeof getNextSaturday22PM === 'function' ? getNextSaturday22PM(now) : (now + (7 * 86400000));
-                const nextSatMidnight = typeof getNextSaturdayMidnight === 'function' ? getNextSaturdayMidnight(now) : (lastSat22 + (2 * 3600000));
 
-                // Ensure nextWeeklyCrowning and nextWeeklyReset are initialized/aligned
-                const targetCrowning = activeUserData.nextWeeklyCrowning || activeUserData.nextWeeklyReset || lastSat22;
-                let targetReset = activeUserData.nextWeeklyReset || nextSatMidnight;
-                // Migrate legacy 22:00 reset timestamp to 00:00 (2 hours later) so reset happens at midnight
-                if (targetReset && new Date(targetReset).getHours() === 22) {
-                    targetReset = targetReset + (2 * 3600000);
-                }
+                const checkCrowningAndMidnightReset = () => {
+                    const now = Date.now();
+                    const lastSat22 = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
+                    const nextSat22 = typeof getNextSaturday22PM === 'function' ? getNextSaturday22PM(now) : (now + (7 * 86400000));
+                    const nextSatMidnight = typeof getNextSaturdayMidnight === 'function' ? getNextSaturdayMidnight(now) : (lastSat22 + (2 * 3600000));
 
-                // PHASE 1: At Saturday 22:00 -> Crown the Weekly Champion (WITHOUT resetting points yet!)
-                if (now >= targetCrowning && (activeUserData.lastCrownedWeekEnd || 0) < targetCrowning) {
-                    const completedWeekEnd = targetCrowning <= now ? targetCrowning : lastSat22;
-                    const completedWeekStart = completedWeekEnd - (7 * 86400000);
+                    // Target crowning at Saturday 22:00
+                    const targetCrowning = activeUserData.nextWeeklyCrowning || activeUserData.nextWeeklyReset || lastSat22;
+                    let targetReset = activeUserData.nextWeeklyReset || nextSatMidnight;
+                    if (targetReset && new Date(targetReset).getHours() === 22) {
+                        targetReset = targetReset + (2 * 3600000);
+                    }
 
-                    // Points earned after 22:00 belong to the next week, so exclude them from the 22:00 crowning comparison
-                    const pointsAfter22 = now > completedWeekEnd ? calculatePointsInWindow(activeUserData, completedWeekEnd, now) : 0;
-                    const currentPointsUpTo22 = Math.max(0, (activeUserData.weeklyPoints || 0) - pointsAfter22);
-                    const userHistoricalPts = calculatePointsInWindow(activeUserData, completedWeekStart, completedWeekEnd);
-                    const userWeeklyPts = Math.max(currentPointsUpTo22, userHistoricalPts);
+                    // PHASE 1: At Saturday 22:00 -> Crown the Weekly Champion (WITHOUT resetting points yet!)
+                    if (now >= targetCrowning && (activeUserData.lastCrownedWeekEnd || 0) < targetCrowning) {
+                        const completedWeekEnd = targetCrowning <= now ? targetCrowning : lastSat22;
+                        const completedWeekStart = completedWeekEnd - (7 * 86400000);
 
-                    const friendsArr = Object.values(liveFriends || {});
-                    let isTop = userWeeklyPts > 0;
-                    let topFriendName = '';
-                    let topFriendPts = 0;
+                        // Points earned after 22:00 belong to the next week
+                        const pointsAfter22 = now > completedWeekEnd ? calculatePointsInWindow(activeUserData, completedWeekEnd, now) : 0;
+                        const currentPointsUpTo22 = Math.max(0, (activeUserData.weeklyPoints || 0) - pointsAfter22);
+                        const userHistoricalPts = calculatePointsInWindow(activeUserData, completedWeekStart, completedWeekEnd);
+                        const userWeeklyPts = Math.max(currentPointsUpTo22, userHistoricalPts);
 
-                    friendsArr.forEach(f => {
-                        const fAfter22 = now > completedWeekEnd ? calculatePointsInWindow(f, completedWeekEnd, now) : 0;
-                        const fCurrentUpTo22 = Math.max(0, (f.weeklyPoints || 0) - fAfter22);
-                        const fHistPts = calculatePointsInWindow(f, completedWeekStart, completedWeekEnd);
-                        const fPts = Math.max(fCurrentUpTo22, f.crownedWeekPoints || 0, fHistPts);
-                        if (fPts > userWeeklyPts) {
-                            isTop = false;
-                            if (fPts > topFriendPts) {
-                                topFriendPts = fPts;
-                                topFriendName = f.name || f.username;
+                        const friendsArr = Object.values(liveFriends || {});
+                        let isTop = userWeeklyPts > 0;
+                        let topFriendName = '';
+                        let topFriendPts = 0;
+
+                        friendsArr.forEach(f => {
+                            const fAfter22 = now > completedWeekEnd ? calculatePointsInWindow(f, completedWeekEnd, now) : 0;
+                            const fCurrentUpTo22 = Math.max(0, (f.weeklyPoints || 0) - fAfter22);
+                            const fHistPts = calculatePointsInWindow(f, completedWeekStart, completedWeekEnd);
+                            const fPts = Math.max(fCurrentUpTo22, f.crownedWeekPoints || 0, fHistPts);
+                            if (fPts > userWeeklyPts) {
+                                isTop = false;
+                                if (fPts > topFriendPts) {
+                                    topFriendPts = fPts;
+                                    topFriendName = f.name || f.username;
+                                }
                             }
-                        }
-                    });
+                        });
 
-                    let updatedBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : { ...b }));
-                    let wonCrown = false;
-                    let newChampCount = 1;
+                        let updatedBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : { ...b }));
+                        let wonCrown = false;
+                        let newChampCount = 1;
 
-                    if (isTop && userWeeklyPts > 0) {
-                        wonCrown = true;
-                        const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
-                        if (champBadgeIdx !== -1) {
-                            newChampCount = (updatedBadges[champBadgeIdx].count || 1) + 1;
-                            updatedBadges[champBadgeIdx] = {
-                                ...updatedBadges[champBadgeIdx],
-                                count: newChampCount,
-                                lastWonAt: new Date().toISOString()
-                            };
-                        } else {
-                            newChampCount = 1;
-                            updatedBadges.push({
-                                id: 'b_weekly_champ',
-                                count: 1,
-                                earnedAt: new Date().toISOString()
+                        if (isTop && userWeeklyPts > 0) {
+                            wonCrown = true;
+                            const champBadgeIdx = updatedBadges.findIndex(b => b.id === 'b_weekly_champ');
+                            if (champBadgeIdx !== -1) {
+                                newChampCount = (updatedBadges[champBadgeIdx].count || 1) + 1;
+                                updatedBadges[champBadgeIdx] = {
+                                    ...updatedBadges[champBadgeIdx],
+                                    count: newChampCount,
+                                    lastWonAt: new Date().toISOString()
+                                };
+                            } else {
+                                newChampCount = 1;
+                                updatedBadges.push({
+                                    id: 'b_weekly_champ',
+                                    count: 1,
+                                    earnedAt: new Date().toISOString()
+                                });
+                            }
+                            showToast(`👑 מזל טוב! השעה 22:00 והוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! (הנקודות יתאפסו ב-00:00) 👑`, 'success');
+                            setCrowningCelebrationModal({
+                                winnerName: activeUserData.name || 'אלופה',
+                                points: userWeeklyPts,
+                                crownCount: newChampCount,
+                                isNewWin: true
                             });
+                        } else if (topFriendName && topFriendPts > 0) {
+                            showToast(`הכתרת אלופת השבוע (22:00)! אלופת השבוע היא ${topFriendName} עם ${topFriendPts} נק' 👑 (איפוס הנקודות ב-00:00)`, 'info');
                         }
-                        showToast(`👑 מזל טוב! השעה 22:00 והוכתרת לאלופת השבוע עם ${userWeeklyPts} נקודות! (הנקודות יתאפסו ב-00:00) 👑`, 'success');
-                        setCrowningCelebrationModal({
-                            winnerName: activeUserData.name || 'אלופה',
-                            points: userWeeklyPts,
-                            crownCount: newChampCount,
-                            isNewWin: true
-                        });
-                    } else if (topFriendName && topFriendPts > 0) {
-                        showToast(`הכתרת אלופת השבוע (22:00)! אלופת השבוע היא ${topFriendName} עם ${topFriendPts} נק' 👑 (איפוס הנקודות ב-00:00)`, 'info');
+
+                        const midnightAfterCrowning = completedWeekEnd + (2 * 3600000);
+                        const isAlsoPastMidnight = now >= midnightAfterCrowning;
+                        const newWeekPointsAfter22 = calculatePointsInWindow(activeUserData, completedWeekEnd, now);
+
+                        updateUserData(prev => ({
+                            ...prev,
+                            highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, userWeeklyPts),
+                            lastWeekPoints: userWeeklyPts,
+                            crownedWeekPoints: userWeeklyPts,
+                            lastCrownedWeekEnd: completedWeekEnd,
+                            nextWeeklyCrowning: nextSat22,
+                            weeklyPoints: isAlsoPastMidnight ? newWeekPointsAfter22 : prev.weeklyPoints,
+                            nextWeeklyReset: isAlsoPastMidnight ? nextSatMidnight : midnightAfterCrowning,
+                            badges: wonCrown ? updatedBadges : (prev.badges || [])
+                        }));
+                        return;
                     }
 
-                    const midnightAfterCrowning = completedWeekEnd + (2 * 3600000);
-                    // If it's already past 00:00 as well, reset points accrued up to 22:00 immediately
-                    const isAlsoPastMidnight = now >= midnightAfterCrowning;
-                    const newWeekPointsAfter22 = calculatePointsInWindow(activeUserData, completedWeekEnd, now);
+                    // PHASE 2: At Saturday 00:00 (Midnight) -> Reset points occurred up to 22:00 that week
+                    if (now >= targetReset) {
+                        const cutoff22PM = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (targetReset - (2 * 3600000));
+                        const pointsEarnedSince22PM = calculatePointsInWindow(activeUserData, cutoff22PM, now);
 
-                    updateUserData(prev => ({
-                        ...prev,
-                        highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, userWeeklyPts),
-                        lastWeekPoints: userWeeklyPts,
-                        crownedWeekPoints: userWeeklyPts,
-                        lastCrownedWeekEnd: completedWeekEnd,
-                        nextWeeklyCrowning: nextSat22,
-                        weeklyPoints: isAlsoPastMidnight ? newWeekPointsAfter22 : prev.weeklyPoints,
-                        nextWeeklyReset: isAlsoPastMidnight ? nextSatMidnight : midnightAfterCrowning,
-                        badges: wonCrown ? updatedBadges : (prev.badges || [])
-                    }));
-                    return;
-                }
-
-                // PHASE 2: At Saturday 00:00 (Midnight) -> Reset the points that occurred up to 22:00 that week
-                if (now >= targetReset) {
-                    const cutoff22PM = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (targetReset - (2 * 3600000));
-                    // Keep only points earned after Saturday 22:00 for the new week
-                    const pointsEarnedSince22PM = calculatePointsInWindow(activeUserData, cutoff22PM, now);
-
-                    updateUserData(prev => ({
-                        ...prev,
-                        highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, prev.weeklyPoints || 0),
-                        lastWeekPoints: prev.crownedWeekPoints || prev.weeklyPoints || 0,
-                        weeklyPoints: pointsEarnedSince22PM,
-                        nextWeeklyCrowning: nextSat22,
-                        nextWeeklyReset: nextSatMidnight
-                    }));
-                    return;
-                }
-
-                // 3. Retroactive healing of missing crowns:
-                const totalPastWins = evaluateHistoricalWeeklyWins(activeUserData, liveFriends);
-                const currentBadges = [...(activeUserData.badges || [])].map(b => (typeof b === 'string' ? { id: b, earnedAt: new Date().toISOString() } : { ...b }));
-                const champBadgeIdx = currentBadges.findIndex(b => b.id === 'b_weekly_champ');
-                const currentChampCount = champBadgeIdx !== -1 ? (currentBadges[champBadgeIdx].count || 1) : 0;
-
-                if (totalPastWins > currentChampCount) {
-                    let healedBadges = [...currentBadges];
-                    if (champBadgeIdx !== -1) {
-                        healedBadges[champBadgeIdx] = {
-                            ...healedBadges[champBadgeIdx],
-                            count: totalPastWins,
-                            lastWonAt: new Date().toISOString()
-                        };
-                    } else {
-                        healedBadges.push({
-                            id: 'b_weekly_champ',
-                            count: totalPastWins,
-                            earnedAt: new Date().toISOString()
-                        });
+                        updateUserData(prev => ({
+                            ...prev,
+                            highestWeeklyPoints: Math.max(prev.highestWeeklyPoints || 0, prev.weeklyPoints || 0),
+                            lastWeekPoints: prev.crownedWeekPoints || prev.weeklyPoints || 0,
+                            weeklyPoints: pointsEarnedSince22PM,
+                            nextWeeklyCrowning: nextSat22,
+                            nextWeeklyReset: nextSatMidnight
+                        }));
+                        return;
                     }
-                    updateUserData(prev => ({
-                        ...prev,
-                        badges: healedBadges
-                    }));
-                    showToast(`👑 עודכנו הכתרים שלך! יש לך כעת ${totalPastWins} כתרים של אלופת השבוע! 👑`, 'success');
-                    setCrowningCelebrationModal({
-                        winnerName: activeUserData.name || 'אלופה',
-                        points: activeUserData.highestWeeklyPoints || activeUserData.weeklyPoints || 0,
-                        crownCount: totalPastWins,
-                        isNewWin: false
-                    });
-                }
-            }, [globalState.activeUser, activeUserData?.nextWeeklyCrowning, activeUserData?.nextWeeklyReset, activeUserData?.weeklyPoints]);
+                };
+
+                checkCrowningAndMidnightReset();
+                const crowningTimerId = setInterval(checkCrowningAndMidnightReset, 30 * 1000);
+                return () => clearInterval(crowningTimerId);
+            }, [globalState.activeUser, activeUserData?.nextWeeklyCrowning, activeUserData?.nextWeeklyReset, activeUserData?.weeklyPoints, activeUserData?.lastCrownedWeekEnd, liveFriends]);
 
 
             useEffect(() => {

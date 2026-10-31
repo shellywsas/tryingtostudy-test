@@ -326,6 +326,12 @@
             Number(remote.lastGlobalWhatsAppReminderSent) || 0
         );
 
+        // Weekly Crowning Invariants: Always preserve crowning timestamps across devices
+        const mergedLastCrownedWeekEnd = Math.max(Number(local.lastCrownedWeekEnd) || 0, Number(remote.lastCrownedWeekEnd) || 0);
+        const mergedCrownedWeekPoints = Math.max(Number(local.crownedWeekPoints) || 0, Number(remote.crownedWeekPoints) || 0);
+        const mergedNextWeeklyCrowning = Math.max(Number(local.nextWeeklyCrowning) || 0, Number(remote.nextWeeklyCrowning) || 0);
+        const mergedNextWeeklyReset = Math.max(Number(local.nextWeeklyReset) || 0, Number(remote.nextWeeklyReset) || 0);
+
         // Scalar preferences: take from whichever is newer for user settings
         const preferRemote = remoteSync >= localSync;
         const base = preferRemote ? { ...local, ...remote } : { ...remote, ...local };
@@ -341,6 +347,10 @@
             currentStreakEmojis: mergedStreakEmojis,
             totalPoints: mergedTotalPoints,
             weeklyPoints: mergedWeeklyPoints,
+            lastCrownedWeekEnd: mergedLastCrownedWeekEnd || base.lastCrownedWeekEnd,
+            crownedWeekPoints: mergedCrownedWeekPoints || base.crownedWeekPoints,
+            nextWeeklyCrowning: mergedNextWeeklyCrowning || base.nextWeeklyCrowning,
+            nextWeeklyReset: mergedNextWeeklyReset || base.nextWeeklyReset,
             lastWeeklyReportSentWeek: mergedWeeklyReportSentWeek,
             lastWeeklyReportSentTime: mergedWeeklyReportSentTime,
             lastGlobalWhatsAppReminderSent: mergedGlobalReminderSent,
