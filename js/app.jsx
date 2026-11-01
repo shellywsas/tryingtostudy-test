@@ -24,8 +24,8 @@ function App() {
                                     if (Array.isArray(parsed.users[u].badges)) {
                                         const cBadge = parsed.users[u].badges.find(b => b && b.id === 'b_weekly_champ');
                                         if (cBadge) {
-                                            if (u === 'שליי' || parsed.users[u].name === 'שלי') cBadge.count = 5;
-                                            if (u.includes('ענבר') || (parsed.users[u].name && parsed.users[u].name.includes('ענבר'))) cBadge.count = 4;
+                                            if (u === 'שליי' || parsed.users[u].name === 'שלי') cBadge.count = Math.max(Number(cBadge.count) || 0, 5);
+                                            if (u.includes('ענבר') || (parsed.users[u].name && parsed.users[u].name.includes('ענבר'))) cBadge.count = Math.max(Number(cBadge.count) || 0, 4);
                                         }
                                     }
                                     if (typeof healCompletedFromHistory === 'function') {
@@ -603,7 +603,7 @@ function App() {
                     const now = Date.now();
                     const lastSat22 = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(now) : (now - (7 * 86400000));
                     const nextSat22 = typeof getNextSaturday22PM === 'function' ? getNextSaturday22PM(now) : (now + (7 * 86400000));
-                    const nextSatMidnight = typeof getNextSaturdayMidnight === 'function' ? getNextSaturdayMidnight(now) : (lastSat22 + (2 * 3600000));
+                    const nextSatMidnight = typeof getNextSaturdayMidnight === 'function' ? getNextSaturdayMidnight(now) : (nextSat22 + (2 * 3600000));
 
                     // Target crowning at Saturday 22:00
                     const targetCrowning = activeUserData.nextWeeklyCrowning || activeUserData.nextWeeklyReset || lastSat22;
@@ -709,6 +709,30 @@ function App() {
                         return;
                     }
                 };
+
+                // Auto-heal all friends in liveFriends if their reset timestamp has passed
+                if (typeof db !== 'undefined' && db && liveFriends) {
+                    const nowTs = Date.now();
+                    const curLastSat22 = typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(nowTs) : (nowTs - (7 * 86400000));
+                    const curNextSat22 = typeof getNextSaturday22PM === 'function' ? getNextSaturday22PM(nowTs) : (nowTs + (7 * 86400000));
+                    const curNextSatMidnight = typeof getNextSaturdayMidnight === 'function' ? getNextSaturdayMidnight(nowTs) : (curNextSat22 + (2 * 3600000));
+
+                    Object.keys(liveFriends).forEach(fUsername => {
+                        const f = liveFriends[fUsername];
+                        if (!f) return;
+                        const fReset = Number(f.nextWeeklyReset) || 0;
+                        if (!fReset || nowTs >= fReset) {
+                            const fEffectivePts = calculatePointsInWindow(f, curLastSat22, nowTs);
+                            const fOldPts = f.crownedWeekPoints || f.weeklyPoints || 0;
+                            db.collection("users").doc(fUsername).update({
+                                weeklyPoints: fEffectivePts,
+                                lastWeekPoints: fOldPts,
+                                nextWeeklyReset: curNextSatMidnight,
+                                nextWeeklyCrowning: curNextSat22
+                            }).catch(e => console.warn('Auto-healing friend doc in firestore:', e));
+                        }
+                    });
+                }
 
                 checkCrowningAndMidnightReset();
                 const crowningTimerId = setInterval(checkCrowningAndMidnightReset, 30 * 1000);
@@ -1062,8 +1086,14 @@ function App() {
             const getWeeklyReportData = () => {
                 if (!activeUserData) return null;
                 const now = new Date();
+                const isSundayMorningReport = (now.getDay() === 0 && now.getHours() < 14);
                 const startOfWeek = new Date(now);
-                startOfWeek.setDate(now.getDate() - now.getDay());
+                if (isSundayMorningReport) {
+                    // Report on completed past week (last Sunday through Saturday)
+                    startOfWeek.setDate(now.getDate() - 7);
+                } else {
+                    startOfWeek.setDate(now.getDate() - now.getDay());
+                }
                 startOfWeek.setHours(0,0,0,0);
                 
                 const endOfWeek = new Date(startOfWeek);
@@ -1490,9 +1520,18 @@ function App() {
                         try {
                             const unsub = db.collection("users").doc(username).onSnapshot(doc => {
                                 if (doc.exists) {
+                                    const friendDocData = doc.data() || {};
+                                    const fNow = Date.now();
+                                    const fTargetReset = Number(friendDocData.nextWeeklyReset) || 0;
+                                    let effWeekly = friendDocData.weeklyPoints || 0;
+                                    if (!fTargetReset || fNow >= fTargetReset) {
+                                        effWeekly = typeof getEffectiveWeeklyPoints === 'function' 
+                                            ? getEffectiveWeeklyPoints(friendDocData, fNow) 
+                                            : calculatePointsInWindow(friendDocData, typeof getLastSaturday22PM === 'function' ? getLastSaturday22PM(fNow) : fNow - 7*86400000, fNow);
+                                    }
                                     setLiveFriends(prev => ({
                                         ...prev, 
-                                        [username]: { ...doc.data(), username: username }
+                                        [username]: { ...friendDocData, weeklyPoints: effWeekly, username: username }
                                     }));
                                 }
                             }, err => {
@@ -7900,7 +7939,10 @@ function App() {
                             const allUsers = [
                                 { ...activeUserData, isMe: true, username: globalState.activeUser },
                                 ...Array.from(uniqueFriendsMap.values())
-                            ];
+                            ].map(u => {
+                                const pts = typeof getEffectiveWeeklyPoints === 'function' ? getEffectiveWeeklyPoints(u) : (u?.weeklyPoints || 0);
+                                return { ...u, weeklyPoints: pts };
+                            });
                             
                             const topUserPoints = Math.max(...allUsers.map(u => u?.weeklyPoints || 0), 0);
                             
@@ -7941,9 +7983,9 @@ function App() {
                                                 const champBadge = (u.badges || []).find(b => b.id === 'b_weekly_champ');
                                                 let champCount = champBadge?.count || (champBadge ? 1 : 0);
                                                 if (u.isMe || u.username === 'שליי' || u.name === 'שלי') {
-                                                    champCount = 5;
+                                                    champCount = Math.max(champCount, 5);
                                                 } else if (u.username && u.username.includes('ענבר')) {
-                                                    champCount = 4;
+                                                    champCount = Math.max(champCount, 4);
                                                 }
                                                 
                                                 return (
@@ -8131,7 +8173,7 @@ function App() {
                                             {ALL_BADGES.map(badge => {
                                                 const earned = userBadges.find(b => (typeof b === 'string' ? b === badge.id : b?.id === badge.id));
                                                 const badgeCount = (badge.id === 'b_weekly_champ')
-                                                    ? (globalState.activeUser === 'שליי' || activeUserData?.name === 'שלי' ? 5 : (earned?.count || 1))
+                                                    ? Math.max(earned?.count || 1, (globalState.activeUser === 'שליי' || activeUserData?.name === 'שלי') ? 5 : 1)
                                                     : (earned?.count || 1);
                                                 return (
                                                     <div key={badge.id} className={`p-4 rounded-2xl border text-center transition-all ${earned ? 'bg-gradient-to-b from-amber-50 to-orange-50 border-amber-200 shadow-sm' : 'bg-stone-50 border-stone-200 opacity-60 grayscale'}`}>
@@ -9904,7 +9946,7 @@ function App() {
                                             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                                                 {earnedBadges.map(b => {
                                                     const fCount = (b.id === 'b_weekly_champ')
-                                                        ? (activeFriend?.username === 'שליי' || activeFriend?.name === 'שלי' ? 5 : (activeFriend?.username?.includes('ענבר') || (activeFriend?.name && activeFriend?.name?.includes('ענבר')) ? 4 : b.count))
+                                                        ? Math.max(Number(b.count) || 1, (activeFriend?.username === 'שליי' || activeFriend?.name === 'שלי') ? 5 : ((activeFriend?.username?.includes('ענבר') || (activeFriend?.name && activeFriend?.name?.includes('ענבר'))) ? 4 : 1))
                                                         : b.count;
                                                     return (
                                                     <div key={b.id} className="bg-gradient-to-b from-amber-50 to-orange-50 border border-amber-200 p-2.5 rounded-xl text-center shadow-xs">
@@ -10938,7 +10980,7 @@ function App() {
                                     <div className="text-right">
                                         <div className="text-xs text-stone-500 font-medium">סך כל הכתרים שלך:</div>
                                         <div className="text-xl font-black text-amber-900">
-                                            {crowningCelebrationModal.crownCount > 5 && (globalState.activeUser === 'שליי' || activeUserData?.name === 'שלי') ? 5 : crowningCelebrationModal.crownCount} כתרים של אלופת השבוע
+                                            {crowningCelebrationModal.crownCount} כתרים של אלופת השבוע
                                         </div>
                                     </div>
                                 </div>

@@ -309,7 +309,31 @@
 
         // Points Invariant: Never decrease points due to stale device syncing
         const mergedTotalPoints = Math.max(Number(local.totalPoints) || 0, Number(remote.totalPoints) || 0);
-        const mergedWeeklyPoints = Math.max(Number(local.weeklyPoints) || 0, Number(remote.weeklyPoints) || 0);
+
+        // Weekly Reset Invariants: A device that has already reset for a NEW week must never have
+        // its reset weekly points overridden by an older device that has not reset yet.
+        const localReset = Number(local.nextWeeklyReset) || 0;
+        const remoteReset = Number(remote.nextWeeklyReset) || 0;
+        let mergedWeeklyPoints;
+        let mergedNextWeeklyReset;
+        let mergedNextWeeklyCrowning;
+
+        if (localReset > remoteReset) {
+            // Local is in a newer week reset cycle
+            mergedWeeklyPoints = Number(local.weeklyPoints) || 0;
+            mergedNextWeeklyReset = localReset;
+            mergedNextWeeklyCrowning = Number(local.nextWeeklyCrowning) || Number(remote.nextWeeklyCrowning) || 0;
+        } else if (remoteReset > localReset) {
+            // Remote is in a newer week reset cycle
+            mergedWeeklyPoints = Number(remote.weeklyPoints) || 0;
+            mergedNextWeeklyReset = remoteReset;
+            mergedNextWeeklyCrowning = Number(remote.nextWeeklyCrowning) || Number(local.nextWeeklyCrowning) || 0;
+        } else {
+            // Both devices are on the same week reset target
+            mergedWeeklyPoints = Math.max(Number(local.weeklyPoints) || 0, Number(remote.weeklyPoints) || 0);
+            mergedNextWeeklyReset = localReset || Math.max(Number(local.nextWeeklyReset) || 0, Number(remote.nextWeeklyReset) || 0);
+            mergedNextWeeklyCrowning = Math.max(Number(local.nextWeeklyCrowning) || 0, Number(remote.nextWeeklyCrowning) || 0);
+        }
 
         // WhatsApp Automation Invariants: Never wipe out sent markers from stale tabs/devices
         const localWeek = local.lastWeeklyReportSentWeek || '';
@@ -329,8 +353,6 @@
         // Weekly Crowning Invariants: Always preserve crowning timestamps across devices
         const mergedLastCrownedWeekEnd = Math.max(Number(local.lastCrownedWeekEnd) || 0, Number(remote.lastCrownedWeekEnd) || 0);
         const mergedCrownedWeekPoints = Math.max(Number(local.crownedWeekPoints) || 0, Number(remote.crownedWeekPoints) || 0);
-        const mergedNextWeeklyCrowning = Math.max(Number(local.nextWeeklyCrowning) || 0, Number(remote.nextWeeklyCrowning) || 0);
-        const mergedNextWeeklyReset = Math.max(Number(local.nextWeeklyReset) || 0, Number(remote.nextWeeklyReset) || 0);
 
         // Scalar preferences: take from whichever is newer for user settings
         const preferRemote = remoteSync >= localSync;
@@ -545,8 +567,8 @@
         const safeLongest = Math.max(user.longestStreak || 0, safeStreak);
 
         // Heal b_weekly_champ badge count:
-        // Shely has 5 total wins (including tonight's week 44 win). Inbar has 4 total wins.
-        // Cap any historical inflation bug so that stale local states (6 or 7) are instantly healed to 5 for Shely and 4 for Inbar.
+        // Shely has at least 5 wins. Inbar has at least 4 wins.
+        // Heal stale device counts that are below baseline floor, or that suffered from historical inflation (>5) before Nov 1.
         let badges = user.badges ? [...user.badges] : [];
         const isShely = user.username === 'שליי' || user.name === 'שלי' || user.id === 'שליי' || (!user.username && !user.name);
         const isInbar = (user.username && user.username.includes('ענבר')) || (user.name && user.name.includes('ענבר'));
@@ -554,14 +576,30 @@
             const champBadgeIdx = badges.findIndex(b => (typeof b === 'object' && b && b.id === 'b_weekly_champ'));
             if (champBadgeIdx !== -1) {
                 const bObj = { ...badges[champBadgeIdx] };
-                if (isShely && bObj.count !== 5) {
-                    bObj.count = 5;
-                    badges[champBadgeIdx] = bObj;
-                    changed = true;
-                } else if (isInbar && bObj.count !== 4) {
-                    bObj.count = 4;
-                    badges[champBadgeIdx] = bObj;
-                    changed = true;
+                const count = Number(bObj.count) || 1;
+                const wonTime = bObj.lastWonAt ? new Date(bObj.lastWonAt).getTime() : 0;
+                const isPreNov2026 = wonTime <= 1793484000000; // on or before Nov 1, 2026 00:00
+
+                if (isShely) {
+                    if (count < 5) {
+                        bObj.count = 5;
+                        badges[champBadgeIdx] = bObj;
+                        changed = true;
+                    } else if (count > 5 && isPreNov2026) {
+                        bObj.count = 5;
+                        badges[champBadgeIdx] = bObj;
+                        changed = true;
+                    }
+                } else if (isInbar) {
+                    if (count < 4) {
+                        bObj.count = 4;
+                        badges[champBadgeIdx] = bObj;
+                        changed = true;
+                    } else if (count > 4 && isPreNov2026) {
+                        bObj.count = 4;
+                        badges[champBadgeIdx] = bObj;
+                        changed = true;
+                    }
                 }
             }
         }

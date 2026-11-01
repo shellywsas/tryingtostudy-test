@@ -20,8 +20,8 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
                 .toLowerCase();
         };
 
-        const getNextSaturday22PM = () => {
-            const now = new Date();
+        const getNextSaturday22PM = (nowInput) => {
+            const now = nowInput instanceof Date ? nowInput : new Date(nowInput || Date.now());
             const d = now.getDay(); // 0 = Sun, ..., 6 = Sat
             const target = new Date(now);
             if (d === 6) {
@@ -57,8 +57,52 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             return target.getTime();
         };
 
+        const getNextSaturdayMidnight = (nowInput) => {
+            const nextSat22 = getNextSaturday22PM(nowInput);
+            return nextSat22 + (2 * 3600000); // 2 hours after Saturday 22:00 is Saturday 24:00 (Sunday 00:00)
+        };
+
+        const getLastSaturdayMidnight = (nowInput) => {
+            const lastSat22 = getLastSaturday22PM(nowInput);
+            return lastSat22 + (2 * 3600000);
+        };
+
+        const getEffectiveWeeklyPoints = (userData, nowInput) => {
+            if (!userData) return 0;
+            const now = typeof nowInput === 'number' ? nowInput : (nowInput instanceof Date ? nowInput.getTime() : Date.now());
+            const lastSat22 = getLastSaturday22PM(now);
+            const targetReset = Number(userData.nextWeeklyReset) || 0;
+            // If user's nextWeeklyReset is missing or in the past, their old weeklyPoints is stale from last week
+            if (!targetReset || now >= targetReset) {
+                const hist = userData.pointsHistory || [];
+                const histSum = hist.filter(h => {
+                    if (!h || !h.date || h.canceled || (h.points || 0) <= 0) return false;
+                    const t = new Date(h.date).getTime();
+                    return !isNaN(t) && t >= lastSat22 && t <= now;
+                }).reduce((sum, h) => sum + (h.points || 0), 0);
+                const tasks = userData.tasks || [];
+                const taskSum = tasks.filter(t => {
+                    if (!t || !t.completed || !t.completedAt || t.givenUp) return false;
+                    const tTime = new Date(t.completedAt).getTime();
+                    return !isNaN(tTime) && tTime >= lastSat22 && tTime <= now;
+                }).reduce((sum, t) => sum + (t.pointsEarned || 1), 0);
+                return Math.max(histSum, taskSum);
+            }
+            return Number(userData.weeklyPoints) || 0;
+        };
+
         const getNextSaturdayNight = getNextSaturday22PM;
         const getLastSaturdayNight = getLastSaturday22PM;
+
+        if (typeof window !== 'undefined') {
+            window.getNextSaturday22PM = getNextSaturday22PM;
+            window.getLastSaturday22PM = getLastSaturday22PM;
+            window.getNextSaturdayMidnight = getNextSaturdayMidnight;
+            window.getLastSaturdayMidnight = getLastSaturdayMidnight;
+            window.getEffectiveWeeklyPoints = getEffectiveWeeklyPoints;
+            window.getNextSaturdayNight = getNextSaturdayNight;
+            window.getLastSaturdayNight = getLastSaturdayNight;
+        }
 
 
         const timeToMins = (t) => {
@@ -693,6 +737,13 @@ const DAYS_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי
             module.exports = {
                 calculateTaskExpectedPoints,
                 formatPastExamDate,
-                syncExamStudyTasks
+                syncExamStudyTasks,
+                getNextSaturday22PM,
+                getLastSaturday22PM,
+                getNextSaturdayMidnight,
+                getLastSaturdayMidnight,
+                getEffectiveWeeklyPoints,
+                getNextSaturdayNight,
+                getLastSaturdayNight
             };
         }

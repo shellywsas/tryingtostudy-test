@@ -188,4 +188,50 @@ console.log('Running StudyStreak Sync Tests...');
     console.log('[PASS] Scenario 5: Stale weekly champ badges correctly healed!');
 }
 
+// SCENARIO 6: Weekly Reset Cross-Device Invariant
+// Computer has already completed the Sunday 00:00 reset (weeklyPoints = 0, nextWeeklyReset = 1794088800000).
+// Phone opens with stale data from Saturday afternoon (weeklyPoints = 50, nextWeeklyReset = 1793484000000).
+// Merge must adopt the new week's reset points (0) and NOT resurrect the old 50 points!
+{
+    const stalePhone = {
+        name: 'שלי',
+        username: 'שליי',
+        weeklyPoints: 50,
+        totalPoints: 120,
+        nextWeeklyReset: 1793484000000,
+        nextWeeklyCrowning: 1793476800000,
+        tasks: []
+    };
+
+    const resetComputer = {
+        name: 'שלי',
+        username: 'שליי',
+        weeklyPoints: 0,
+        totalPoints: 120,
+        nextWeeklyReset: 1794088800000,
+        nextWeeklyCrowning: 1794081600000,
+        tasks: []
+    };
+
+    const merged = sync.mergeUserData(stalePhone, resetComputer);
+    assert.strictEqual(merged.weeklyPoints, 0, 'Weekly points must stay reset at 0, not 50!');
+    assert.strictEqual(merged.nextWeeklyReset, 1794088800000, 'Must keep the new week reset target!');
+    console.log('[PASS] Scenario 6: Stale device does not resurrect pre-reset weekly points!');
+}
+
+// SCENARIO 7: Future Crown Win Preservation (Week 45+)
+// Shely wins her 6th crown on Saturday Nov 7, 2026. Healing must preserve 6 crowns!
+{
+    const shelyWeek45 = {
+        name: 'שלי',
+        username: 'שליי',
+        tasks: [],
+        badges: [{ id: 'b_weekly_champ', count: 6, lastWonAt: '2026-11-07T22:00:00.000Z' }]
+    };
+    const healed = sync.healCompletedFromHistory(shelyWeek45);
+    const champ = healed.badges.find(b => b.id === 'b_weekly_champ');
+    assert.strictEqual(champ.count, 6, 'Future 6th crown must be preserved and NOT capped at 5!');
+    console.log('[PASS] Scenario 7: Future crown wins (6+) are preserved and not capped!');
+}
+
 console.log('ALL TESTS PASSED SUCCESSFULLY! 🚀');
